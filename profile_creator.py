@@ -90,8 +90,10 @@ class ProfileCreator:
     ) -> Optional[Dict]:
         while True:
             proxy = self.sequence.next_proxy()
-            proxy_payload = proxy.to_api_payload(proxy_type=DEFAULT_PROXY_TYPE)
-            print(f"🔌 Добавление HTTP-прокси в профиль: {proxy.auth_display}")
+            proxy_payload = proxy.to_api_payload(
+                name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
+            )
+            print(f"🔌 Добавление прокси: {proxy.auth_display}")
 
             proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
             proxy_data = self._extract_created_proxy(proxy_result)
@@ -130,10 +132,10 @@ class ProfileCreator:
     ) -> Optional[Dict]:
         while True:
             proxy = self.sequence.next_proxy()
-            proxy_payload = proxy.to_api_payload(proxy_type=DEFAULT_PROXY_TYPE)
-            print(
-                f"🔌 Добавление следующего HTTP-прокси в профиль: {proxy.auth_display}"
+            proxy_payload = proxy.to_api_payload(
+                name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
             )
+            print(f"🔌 Добавление следующего прокси: {proxy.auth_display}")
 
             proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
             proxy_data = self._extract_created_proxy(proxy_result)
