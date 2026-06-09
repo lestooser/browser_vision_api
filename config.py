@@ -16,6 +16,7 @@ LOCAL_URL = "http://127.0.0.1:3030"
 DEFAULT_PLATFORM = "Windows"
 DEFAULT_BROWSER = "Chrome"
 DEFAULT_VERSION = "latest"
+DEFAULT_PROXY_TYPE = "SOCKS5"
 
 # Настройки экрана
 DEFAULT_SCREEN = {

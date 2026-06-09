@@ -150,6 +150,18 @@ class BrowserVisionClient:
         url = f"{self.api_url}/folders/{folder_id}/profiles"
         return self._request("POST", url, json=profile_data)
 
+    def update_profile(
+        self, folder_id: str, profile_id: str, profile_data: Dict
+    ) -> Optional[Dict]:
+        """Обновляет существующий профиль"""
+        url = f"{self.api_url}/folders/{folder_id}/profiles/{profile_id}"
+        return self._request("PATCH", url, json=profile_data)
+
+    def create_proxy(self, folder_id: str, proxy_data: Dict) -> Optional[Dict]:
+        """Создаёт прокси в папке"""
+        url = f"{self.api_url}/folders/{folder_id}/proxies"
+        return self._request("POST", url, json={"proxies": [proxy_data]})
+
     def test_connection(self) -> bool:
         """Проверяет соединение с API"""
         try:

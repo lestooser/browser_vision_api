@@ -65,12 +65,8 @@ def create_single_profile(client, fg, creator):
     """Создаёт один профиль"""
     print(f"\n📝 Создание профиля в группу: {FOLDER_ID}")
     print("-" * 60)
-
-    name = input("Имя профиля (Enter для авто): ").strip()
-    if not name:
-        gpu = fg.get_random_gpu()
-        gpu_model = gpu.split()[-1] if gpu else "Default"
-        name = f"Profile - {gpu_model}"
+    print("🧾 Имя будет взято последовательно из config/pers_id.txt и config/town.txt")
+    print("🔌 Прокси будет взят последовательно из config/proxy.txt")
 
     print("\n⚙️  Применяются обязательные настройки профиля:")
     print("  • Canvas: Noise")
@@ -95,7 +91,7 @@ def create_single_profile(client, fg, creator):
 
     confirm = input("\nСоздать профиль? (y/n): ").strip().lower()
     if confirm == "y":
-        creator.create(name, fingerprint)
+        creator.create_with_sequential_config(fingerprint)
     else:
         print("⚠️  Создание отменено")
 
@@ -114,15 +110,15 @@ def create_batch_profiles(client, fg, creator):
         print("❌ Введите корректное число")
         return
 
-    prefix = input("Префикс имени (Enter для 'Profile'): ").strip()
-    if not prefix:
-        prefix = "Profile"
+    print(
+        "🧾 Имена будут взяты последовательно из config/pers_id.txt и config/town.txt"
+    )
+    print("🔌 Прокси будут взяты последовательно из config/proxy.txt")
 
     confirm = input(f"\nСоздать {count} профилей? (y/n): ").strip().lower()
     if confirm == "y":
         creator.create_batch(
             count=count,
-            name_prefix=prefix,
             webrtc_mode=MODES["AUTO"],
             webgl_mode=MODES["MANUAL"],
             canvas_mode=MODES["MANUAL"],

@@ -4,7 +4,8 @@
 
 from typing import Any, Dict, List, Optional
 
-from config import DEFAULT_BROWSER, FOLDER_ID
+from config import DEFAULT_BROWSER, DEFAULT_PROXY_TYPE, FOLDER_ID
+from config_sequence import SequentialConfig
 
 
 class ProfileCreator:
@@ -14,6 +15,7 @@ class ProfileCreator:
         self.client = client
         self.fg = fingerprint_generator
         self.folder_id = FOLDER_ID
+        self.sequence = SequentialConfig()
 
     def create(
         self,
@@ -48,6 +50,146 @@ class ProfileCreator:
             print(f"❌ Не удалось создать профиль '{name}'")
             return None
 
+    def create_with_sequential_config(
+        self,
+        fingerprint: Dict[str, Any],
+        notes: str = "",
+        tags: List[str] = None,
+        browser: str = DEFAULT_BROWSER,
+        platform: str = "Windows",
+    ) -> Optional[Dict]:
+        """Создаёт профиль с очередным именем и обязательным рабочим прокси."""
+        name = self.sequence.next_profile_name()
+        print(f"\n🧾 Название профиля: {name}")
+
+        try:
+            result = self._create_profile_with_next_working_proxy(
+                name=name,
+                fingerprint=fingerprint,
+                notes=notes,
+                tags=tags,
+                browser=browser,
+                platform=platform,
+            )
+        except Exception:
+            self.sequence.rollback_profile_name()
+            raise
+
+        if not result:
+            self.sequence.rollback_profile_name()
+        return result
+
+    def _create_profile_with_next_working_proxy(
+        self,
+        name: str,
+        fingerprint: Dict[str, Any],
+        notes: str = "",
+        tags: List[str] = None,
+        browser: str = DEFAULT_BROWSER,
+        platform: str = "Windows",
+    ) -> Optional[Dict]:
+        while True:
+            proxy = self.sequence.next_proxy()
+            proxy_payload = proxy.to_api_payload(
+                name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
+            )
+            print(f"🔌 Добавление прокси: {proxy.display}")
+
+            proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
+            proxy_data = self._extract_created_proxy(proxy_result)
+            if not proxy_data or not proxy_data.get("id"):
+                print("⚠️  Прокси не поставился, используется следующий")
+                continue
+
+            proxy_id = proxy_data["id"]
+            result = self.create(
+                name=name,
+                fingerprint=fingerprint,
+                notes=notes,
+                tags=tags,
+                proxy_id=proxy_id,
+                browser=browser,
+                platform=platform,
+            )
+            if not result:
+                return None
+
+            if self._profile_has_proxy(result, proxy_id):
+                print(f"🔒 Прокси привязан к профилю: {proxy.display}")
+                return result
+
+            profile_id = self._extract_profile_id(result)
+            if not profile_id:
+                print("⚠️  Не удалось проверить прокси профиля, используется следующий")
+                continue
+
+            fixed_result = self._attach_next_proxy_to_existing_profile(profile_id, name)
+            if fixed_result:
+                return fixed_result
+
+    def _attach_next_proxy_to_existing_profile(
+        self, profile_id: str, profile_name: str
+    ) -> Optional[Dict]:
+        while True:
+            proxy = self.sequence.next_proxy()
+            proxy_payload = proxy.to_api_payload(
+                name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
+            )
+            print(f"🔌 Добавление следующего прокси: {proxy.display}")
+
+            proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
+            proxy_data = self._extract_created_proxy(proxy_result)
+            if not proxy_data or not proxy_data.get("id"):
+                print("⚠️  Прокси не поставился, используется следующий")
+                continue
+
+            proxy_id = proxy_data["id"]
+            update_result = self.client.update_profile(
+                self.folder_id, profile_id, {"proxy_id": proxy_id}
+            )
+            if self._profile_has_proxy(update_result, proxy_id):
+                print(f"🔒 Прокси привязан к профилю '{profile_name}': {proxy.display}")
+                return update_result
+
+            profile = self.client.get_profile_by_id(self.folder_id, profile_id)
+            if profile and profile.get("proxy_id") == proxy_id:
+                print(f"🔒 Прокси привязан к профилю '{profile_name}': {proxy.display}")
+                return {"data": profile}
+
+            print("⚠️  Прокси не привязался к профилю, используется следующий")
+
+    @staticmethod
+    def _extract_created_proxy(result: Optional[Dict]) -> Optional[Dict]:
+        if not result:
+            return None
+        data = result.get("data")
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data
+        return None
+
+    @staticmethod
+    def _extract_profile_id(result: Optional[Dict]) -> Optional[str]:
+        if not result:
+            return None
+        data = result.get("data")
+        if isinstance(data, dict):
+            return data.get("id")
+        return None
+
+    @staticmethod
+    def _profile_has_proxy(result: Optional[Dict], proxy_id: str) -> bool:
+        if not result:
+            return False
+        data = result.get("data")
+        if not isinstance(data, dict):
+            return False
+        if data.get("proxy_id") == proxy_id:
+            return True
+        proxy = data.get("proxy")
+        return isinstance(proxy, dict) and proxy.get("id") == proxy_id
+
     def create_batch(
         self, count: int, name_prefix: str = "Profile", **fingerprint_kwargs
     ) -> List[Optional[Dict]]:
@@ -58,10 +200,9 @@ class ProfileCreator:
         print("=" * 50)
 
         for i in range(1, count + 1):
-            name = f"{name_prefix} #{i}"
             fingerprint = self.fg.generate(**fingerprint_kwargs)
-            result = self.create(
-                name, fingerprint, notes=f"Auto-generated profile #{i}"
+            result = self.create_with_sequential_config(
+                fingerprint, notes=f"Auto-generated profile #{i}"
             )
             results.append(result)
             print(f"Progress: {i}/{count} ({i / count * 100:.1f}%)\n")
