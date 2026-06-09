@@ -38,13 +38,22 @@ class ProxyConfig:
             return self.display
         return f"{self.username}:***@{self.display}"
 
-    def to_api_payload(self, name: str, proxy_type: str) -> Dict[str, Any]:
+    @property
+    def full_value(self) -> str:
+        if not self.has_auth:
+            return self.display
+        return f"{self.display}:{self.username}:{self.password}"
+
+    def to_api_payload(
+        self, proxy_type: str, name: Optional[str] = None
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "proxy_name": name,
             "proxy_type": proxy_type,
             "proxy_ip": self.host,
             "proxy_port": self.port,
         }
+        if name:
+            payload["proxy_name"] = name
         if self.username:
             payload["proxy_username"] = self.username
         if self.password:
@@ -160,8 +169,11 @@ class SequentialConfig:
     def _parse_proxy(raw_proxy: str) -> ProxyConfig:
         # В config/proxy.txt может лежать полный прокси:
         # pool.proxys.io:10842:user331393o5596r781204:6t9ija
-        # Для Browser Vision логин и пароль нужно передавать отдельными полями
-        # proxy_username/proxy_password, а не склеенной строкой.
+        # или строка с завершающей точкой с запятой после копирования из UI.
+        # В Browser Vision НЕ задаём искусственное имя "Proxy host:port":
+        # оставляем proxy_name пустым, а сам HTTP-прокси передаём отдельными
+        # полями proxy_ip/proxy_port/proxy_username/proxy_password.
+        raw_proxy = raw_proxy.strip().rstrip(";").strip()
         parts = raw_proxy.split(":")
         if len(parts) not in (2, 4):
             raise ValueError(
