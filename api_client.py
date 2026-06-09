@@ -20,6 +20,12 @@ class BrowserVisionClient:
         self.debug = debug
         self.headers = {"X-Token": token, "Content-Type": "application/json"}
         self.session = requests.Session()
+        # Не используем proxy-переменные окружения для запросов к Browser Vision API:
+        # без requests[socks] SOCKS-прокси из окружения приводят к ошибке
+        # "Missing dependencies for SOCKS support". Прокси из config/proxy.txt
+        # передаются в Browser Vision как данные создаваемого профиля, а не как
+        # транспортный прокси для самого API-клиента.
+        self.session.trust_env = False
         self.session.headers.update(self.headers)
 
     def _request(self, method: str, url: str, **kwargs) -> Optional[Dict[str, Any]]:
