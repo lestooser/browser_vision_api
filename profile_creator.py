@@ -93,7 +93,7 @@ class ProfileCreator:
             proxy_payload = proxy.to_api_payload(
                 name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
             )
-            print(f"🔌 Добавление прокси: {proxy.display}")
+            print(f"🔌 Добавление прокси: {proxy.auth_display}")
 
             proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
             proxy_data = self._extract_created_proxy(proxy_result)
@@ -115,7 +115,7 @@ class ProfileCreator:
                 return None
 
             if self._profile_has_proxy(result, proxy_id):
-                print(f"🔒 Прокси привязан к профилю: {proxy.display}")
+                self._print_bound_proxy(proxy)
                 return result
 
             profile_id = self._extract_profile_id(result)
@@ -135,7 +135,7 @@ class ProfileCreator:
             proxy_payload = proxy.to_api_payload(
                 name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
             )
-            print(f"🔌 Добавление следующего прокси: {proxy.display}")
+            print(f"🔌 Добавление следующего прокси: {proxy.auth_display}")
 
             proxy_result = self.client.create_proxy(self.folder_id, proxy_payload)
             proxy_data = self._extract_created_proxy(proxy_result)
@@ -148,15 +148,25 @@ class ProfileCreator:
                 self.folder_id, profile_id, {"proxy_id": proxy_id}
             )
             if self._profile_has_proxy(update_result, proxy_id):
-                print(f"🔒 Прокси привязан к профилю '{profile_name}': {proxy.display}")
+                self._print_bound_proxy(proxy, profile_name)
                 return update_result
 
             profile = self.client.get_profile_by_id(self.folder_id, profile_id)
             if profile and profile.get("proxy_id") == proxy_id:
-                print(f"🔒 Прокси привязан к профилю '{profile_name}': {proxy.display}")
+                self._print_bound_proxy(proxy, profile_name)
                 return {"data": profile}
 
             print("⚠️  Прокси не привязался к профилю, используется следующий")
+
+    @staticmethod
+    def _print_bound_proxy(proxy, profile_name: Optional[str] = None) -> None:
+        credentials = "с логином/паролем" if proxy.has_auth else "без логина/пароля"
+        if profile_name:
+            print(
+                f"🔒 Прокси {credentials} привязан к профилю '{profile_name}': {proxy.display}"
+            )
+        else:
+            print(f"🔒 Прокси {credentials} привязан к профилю: {proxy.display}")
 
     @staticmethod
     def _extract_created_proxy(result: Optional[Dict]) -> Optional[Dict]:
