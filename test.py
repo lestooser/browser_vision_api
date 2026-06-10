@@ -15,7 +15,7 @@ fingerprint["webrtc_pref"] = "auto"
 fingerprint["canvas_pref"] = "real"
 fingerprint["webgl_pref"] = "real"
 fingerprint["audio_pref"] = None
-fingerprint["proxy_id"] = "pool.proxys.io:10848:user331393o5596r781204:6t9ija"
+# fingerprint["proxy_id"] = "pool.proxys.io:10848:user331393o5596r781204:6t9ija"
 fingerprint["ports_protection"] = [
     3389,
     5900,
@@ -34,6 +34,8 @@ fingerprint["ports_protection"] = [
 fingerprint["navigator"]["language"] = "auto"
 fingerprint["navigator"]["languages"] = []
 
+from test_proxy import get_proxies_id
+
 
 # Profile creating
 result = requests.post(
@@ -43,7 +45,7 @@ result = requests.post(
         "profile_name": "Profile name2",
         "profile_notes": "",
         "profile_tags": [],
-        # "proxy_id": "pool.proxys.io:10848:user331393o5596r781204:6t9ija",
+        "proxy_id": get_proxies_id(),
         "new_profile_tags": [],
         "profile_status": None,
         "browser": "Chrome",

@@ -11,6 +11,8 @@ from config_sequence import SequentialConfig
 class ProfileCreator:
     """Создаёт профили с заданными настройками"""
 
+    from test_proxy import get_proxies_id
+
     def __init__(self, client, fingerprint_generator):
         self.client = client
         self.fg = fingerprint_generator
@@ -23,7 +25,7 @@ class ProfileCreator:
         fingerprint: Dict[str, Any],
         notes: str = "",
         tags: List[str] = None,
-        proxy_id: Optional[str] = None,
+        proxy_id: Optional[str] = get_proxies_id(),
         browser: str = DEFAULT_BROWSER,
         platform: str = "Windows",
     ) -> Optional[Dict]:

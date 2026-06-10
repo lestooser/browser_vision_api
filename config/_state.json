@@ -1,1 +1,6 @@
-{"proxy_current": 0, "tower_current": 0, "prof_id_current": 0}
+{
+  "proxy_current": 4,
+  "tower_current": 4,
+  "prof_id_current": 4,
+  "town_current": 4
+}
