@@ -78,9 +78,14 @@ class SequentialConfig:
         )
 
         if pers_index >= len(pers_ids):
-            raise ValueError("Закончились значения в config/pers_id.txt")
+            state["prof_id_current"] = 0
+            pers_index = self._get_index(state, "prof_id_current")
+
         if town_index >= len(towns):
-            raise ValueError("Закончились значения в config/town.txt")
+            state["town_current"] = 0
+            town_index = self._get_index(
+                state, "town_current", fallback_key="tower_current"
+            )
 
         pers_id = self._normalize_pers_id(pers_ids[pers_index])
         town = towns[town_index]

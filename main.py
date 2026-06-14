@@ -6,6 +6,8 @@ from api_client import BrowserVisionClient
 from config import FOLDER_ID, MODES
 from fingerprint_generator import FingerprintGenerator
 from profile_creator import ProfileCreator
+from profile_script.open_profile_api import openProfule
+from profile_script.tebor import start_connect
 
 
 def print_separator():
@@ -91,7 +93,8 @@ def create_single_profile(client, fg, creator):
 
     confirm = input("\nСоздать профиль? (y/n): ").strip().lower()
     if confirm == "y":
-        creator.create_with_sequential_config(fingerprint)
+        result = creator.create_with_sequential_config(fingerprint)
+        return result
     else:
         print("⚠️  Создание отменено")
 
@@ -117,7 +120,7 @@ def create_batch_profiles(client, fg, creator):
 
     confirm = input(f"\nСоздать {count} профилей? (y/n): ").strip().lower()
     if confirm == "y":
-        creator.create_batch(
+        result = creator.create_batch(
             count=count,
             webrtc_mode=MODES["AUTO"],
             webgl_mode=MODES["MANUAL"],
@@ -127,6 +130,7 @@ def create_batch_profiles(client, fg, creator):
             random_gpu=True,
             random_webcam=True,
         )
+        return result
     else:
         print("⚠️  Создание отменено")
 
@@ -189,6 +193,7 @@ def main():
 
     while True:
         print_separator()
+        # нужно добавить проверку открытых профилей и их портов
         print("📋 Главное меню:")
         print("-" * 60)
         print("  📊 ПРОСМОТР:")
@@ -201,8 +206,8 @@ def main():
         print()
         print("  🔍 СПИСКИ ИЗ API:")
         print("    5. Доступные видеокарты (GPU)")
-        print("    6. Доступные языки")
-        print("    7. Доступные часовые пояса")
+        print("    6. Подключиться к браузеру")
+        print("    7. Открывать профиль")
         print()
         print("  ⚙️  ДРУГОЕ:")
         print("    8. Проверить соединение")
@@ -227,19 +232,37 @@ def main():
                     print("❌ Не удалось получить группы")
 
             elif choice == "3":
-                create_single_profile(client, fg, creator)
+                PORT_NUMBER = "56719"
+                result = create_single_profile(client, fg, creator)
+                print("Профиль создан")
+                # print(f"prof_id = {result['data']['id']}, его порт = {result['data']['port']}")
+                openProfule(result["data"]["id"], PORT_NUMBER=PORT_NUMBER)
+                print("Открытие профиля")
+                start_connect(
+                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
+                )
 
             elif choice == "4":
+                PORT_NUMBER = "56719"
                 create_batch_profiles(client, fg, creator)
+                openProfule(result["data"]["id"], PORT_NUMBER=PORT_NUMBER)
+                start_connect(
+                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
+                )
 
             elif choice == "5":
                 show_variations(client, "renderer", "💾 Доступные видеокарты")
 
             elif choice == "6":
-                show_variations(client, "language", "🌐 Доступные языки")
+                # нужно добавить ввод порта
+
+                start_connect(
+                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
+                )
 
             elif choice == "7":
-                show_variations(client, "timezone", "🕐 Доступные часовые пояса")
+                prof_id = input("Введите id профиля")
+                openProfule(prof_id, PORT_NUMBER=PORT_NUMBER)
 
             elif choice == "8":
                 print("\n🔌 Проверка соединения...")

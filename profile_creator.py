@@ -104,6 +104,7 @@ class ProfileCreator:
                 continue
 
             proxy_id = proxy_data["id"]
+            
             result = self.create(
                 name=name,
                 fingerprint=fingerprint,
