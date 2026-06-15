@@ -2,12 +2,13 @@
 Основной скрипт для работы с Browser Vision API
 """
 
+import subprocess
+import sys
+
 from api_client import BrowserVisionClient
 from config import FOLDER_ID, MODES
 from fingerprint_generator import FingerprintGenerator
 from profile_creator import ProfileCreator
-from profile_script.open_profile_api import openProfule
-from profile_script.tebor import start_connect
 
 
 def print_separator():
@@ -16,13 +17,12 @@ def print_separator():
 
 
 def show_current_folder_profiles(client):
-    """Показывает профили в текущей группе"""
+    """Показывает профили в группе"""
     print("\n📂 Профили в группе")
     print(f"   ID группы: {FOLDER_ID}")
     print("-" * 60)
 
     profiles_data = client.get_profiles(FOLDER_ID)
-
     if not profiles_data:
         print("❌ Не удалось получить профили")
         return
@@ -69,6 +69,7 @@ def create_single_profile(client, fg, creator):
     print("-" * 60)
     print("🧾 Имя будет взято последовательно из config/pers_id.txt и config/town.txt")
     print("🔌 Прокси будет взят последовательно из config/proxy.txt")
+    print("🔌 Selenium CDP порт будет сгенерирован автоматически")
 
     print("\n⚙️  Применяются обязательные настройки профиля:")
     print("  • Canvas: Noise")
@@ -93,8 +94,7 @@ def create_single_profile(client, fg, creator):
 
     confirm = input("\nСоздать профиль? (y/n): ").strip().lower()
     if confirm == "y":
-        result = creator.create_with_sequential_config(fingerprint)
-        return result
+        creator.create_with_sequential_config(fingerprint)
     else:
         print("⚠️  Создание отменено")
 
@@ -117,10 +117,11 @@ def create_batch_profiles(client, fg, creator):
         "🧾 Имена будут взяты последовательно из config/pers_id.txt и config/town.txt"
     )
     print("🔌 Прокси будут взяты последовательно из config/proxy.txt")
+    print("🔌 Selenium CDP порты будут сгенерированы автоматически")
 
     confirm = input(f"\nСоздать {count} профилей? (y/n): ").strip().lower()
     if confirm == "y":
-        result = creator.create_batch(
+        creator.create_batch(
             count=count,
             webrtc_mode=MODES["AUTO"],
             webgl_mode=MODES["MANUAL"],
@@ -130,7 +131,6 @@ def create_batch_profiles(client, fg, creator):
             random_gpu=True,
             random_webcam=True,
         )
-        return result
     else:
         print("⚠️  Создание отменено")
 
@@ -158,6 +158,81 @@ def show_variations(client, variation_type, title):
 
     if len(variations) > 30:
         print(f"\n  ... и ещё {len(variations) - 30}")
+
+
+def show_running_profiles(client):
+    """Показывает запущенные профили."""
+    print("\n🟢 Запущенные профили")
+    print("-" * 60)
+
+    profiles = client.get_running_profiles()
+    if profiles is None:
+        print("❌ Не удалось получить список запущенных профилей")
+        return
+
+    if not profiles:
+        print("⚠️  Запущенных профилей нет")
+        return
+
+    for profile in profiles:
+        print(
+            f"• {profile.get('profile_id', 'N/A')} "
+            f"folder={profile.get('folder_id', 'N/A')} "
+            f"port={profile.get('port', 'N/A')}"
+        )
+
+
+def ask_profile_id() -> Optional[str]:  # noqa: F821
+    profile_id = input("\nID профиля: ").strip()
+    return profile_id or None
+
+
+def start_profile_with_stored_port(client):
+    """Запускает профиль с сохранённым CDP-портом."""
+    profile_id = ask_profile_id()
+    if not profile_id:
+        print("❌ ID профиля не указан")
+        return
+
+    profile = client.get_profile_by_id(FOLDER_ID, profile_id)
+    if not profile:
+        print("❌ Профиль не найден")
+        return
+
+    port = ProfileCreator.extract_debug_port(profile)
+    result = client.start_profile(FOLDER_ID, profile_id, port=port)
+    if result:
+        actual_port = result.get("port") or port
+        print("✅ Профиль запущен")
+        if actual_port:
+            print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
+            # Запуск tebor.py в отдельном окне
+            cmd = [
+                sys.executable,
+                "tebor.py",
+                "--profile-id",
+                profile_id,
+                "--port",
+                str(actual_port),
+            ]
+            print(f"Запуск tebor.py: {' '.join(cmd)}")
+            subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    else:
+        print("❌ Не удалось запустить профиль")
+
+
+def stop_profile(client):
+    """Останавливает профиль."""
+    profile_id = ask_profile_id()
+    if not profile_id:
+        print("❌ ID профиля не указан")
+        return
+
+    result = client.stop_profile(FOLDER_ID, profile_id)
+    if result:
+        print("✅ Профиль остановлен")
+    else:
+        print("❌ Не удалось остановить профиль")
 
 
 def main():
@@ -193,7 +268,6 @@ def main():
 
     while True:
         print_separator()
-        # нужно добавить проверку открытых профилей и их портов
         print("📋 Главное меню:")
         print("-" * 60)
         print("  📊 ПРОСМОТР:")
@@ -206,8 +280,13 @@ def main():
         print()
         print("  🔍 СПИСКИ ИЗ API:")
         print("    5. Доступные видеокарты (GPU)")
-        print("    6. Подключиться к браузеру")
-        print("    7. Открывать профиль")
+        print("    6. Доступные языки")
+        print("    7. Доступные часовые пояса")
+        print()
+        print("  🟢 ЗАПУСК SELENIUM/CDP:")
+        print("    9. Запущенные профили")
+        print("    10. Запустить профиль с сохранённым портом")
+        print("    11. Остановить профиль")
         print()
         print("  ⚙️  ДРУГОЕ:")
         print("    8. Проверить соединение")
@@ -232,37 +311,19 @@ def main():
                     print("❌ Не удалось получить группы")
 
             elif choice == "3":
-                PORT_NUMBER = "56719"
-                result = create_single_profile(client, fg, creator)
-                print("Профиль создан")
-                # print(f"prof_id = {result['data']['id']}, его порт = {result['data']['port']}")
-                openProfule(result["data"]["id"], PORT_NUMBER=PORT_NUMBER)
-                print("Открытие профиля")
-                start_connect(
-                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
-                )
+                create_single_profile(client, fg, creator)
 
             elif choice == "4":
-                PORT_NUMBER = "56719"
                 create_batch_profiles(client, fg, creator)
-                openProfule(result["data"]["id"], PORT_NUMBER=PORT_NUMBER)
-                start_connect(
-                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
-                )
 
             elif choice == "5":
                 show_variations(client, "renderer", "💾 Доступные видеокарты")
 
             elif choice == "6":
-                # нужно добавить ввод порта
-
-                start_connect(
-                    LOGIN="79298514911", PASSWORD="solnce", PORT_NUMBER=PORT_NUMBER
-                )
+                show_variations(client, "language", "🌐 Доступные языки")
 
             elif choice == "7":
-                prof_id = input("Введите id профиля")
-                openProfule(prof_id, PORT_NUMBER=PORT_NUMBER)
+                show_variations(client, "timezone", "🕐 Доступные часовые пояса")
 
             elif choice == "8":
                 print("\n🔌 Проверка соединения...")
@@ -270,6 +331,15 @@ def main():
                     print("✅ Соединение работает!")
                 else:
                     print("❌ Соединение не установлено")
+
+            elif choice == "9":
+                show_running_profiles(client)
+
+            elif choice == "10":
+                start_profile_with_stored_port(client)
+
+            elif choice == "11":
+                stop_profile(client)
 
             elif choice == "0":
                 print("\n👋 До свидания!")
