@@ -7,14 +7,15 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from config import API_BASE_URL, LOCAL_URL, TOKEN
+from config import API_BASE_URL, LOCAL_TOKEN, LOCAL_URL, TOKEN
 
 
 class BrowserVisionClient:
     """Клиент для взаимодействия с API Browser Vision"""
 
-    def __init__(self, token: str = TOKEN, debug: bool = False):
+    def __init__(self, token: str = TOKEN, local_token: str = LOCAL_TOKEN, debug: bool = False):
         self.token = token
+        self.local_token = local_token
         self.api_url = API_BASE_URL
         self.local_url = LOCAL_URL
         self.debug = debug
@@ -175,3 +176,34 @@ class BrowserVisionClient:
             return fingerprint is not None
         except:
             return False
+
+    def start_profile(
+        self, folder_id: str, profile_id: str, port: Optional[int] = None
+    ) -> Optional[Dict]:
+        """Запускает профиль через локальный API"""
+        return self._local_request(
+            "POST", f"/start/{folder_id}/{profile_id}",
+            body={"args": [f"--remote-debugging-port={port}"]} if port else {}
+        )
+
+    def stop_profile(self, folder_id: str, profile_id: str) -> Optional[Dict]:
+        """Останавливает профиль"""
+        return self._local_request("POST", f"/stop/{folder_id}/{profile_id}")
+
+    def get_running_profiles(self) -> Optional[List[Dict]]:
+        """Получает список запущенных профилей"""
+        return self._local_request("GET", "/running")
+
+    def _local_request(
+        self, method: str, path: str, body: Optional[Dict] = None
+    ) -> Optional[Dict]:
+        """Выполняет запрос к локальному API (127.0.0.1:3030)"""
+        url = f"{self.local_url}{path}"
+        headers = {"X-Token": self.local_token, "Content-Type": "application/json"}
+        try:
+            response = requests.request(method, url, headers=headers, json=body, timeout=30)
+            response.raise_for_status()
+            return response.json() if response.text else None
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Ошибка локального API: {e}")
+            return None

@@ -2,6 +2,8 @@
 Модуль для создания профилей
 """
 
+import random
+import socket
 from typing import Any, Dict, List, Optional
 
 from config import DEFAULT_BROWSER, DEFAULT_PROXY_TYPE, FOLDER_ID
@@ -202,6 +204,30 @@ class ProfileCreator:
             return True
         proxy = data.get("proxy")
         return isinstance(proxy, dict) and proxy.get("id") == proxy_id
+
+    @staticmethod
+    def extract_debug_port(profile: Optional[Dict]) -> Optional[int]:
+        if not profile:
+            return None
+        port = profile.get("port") or profile.get("debug_port")
+        if port is None:
+            return None
+        try:
+            return int(port)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def generate_cdp_port() -> int:
+        import socket
+        while True:
+            port = random.randint(10000, 65535)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.bind(("", port))
+                    return port
+            except OSError:
+                continue
 
     def create_batch(
         self, count: int, name_prefix: str = "Profile", **fingerprint_kwargs

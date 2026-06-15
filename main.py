@@ -4,6 +4,7 @@
 
 import subprocess
 import sys
+import time
 
 from api_client import BrowserVisionClient
 from config import FOLDER_ID, MODES
@@ -93,14 +94,68 @@ def create_single_profile(client, fg, creator):
     fg.print_info(fingerprint)
 
     confirm = input("\nСоздать профиль? (y/n): ").strip().lower()
-    if confirm == "y":
-        creator.create_with_sequential_config(fingerprint)
-    else:
+    if confirm != "y":
         print("⚠️  Создание отменено")
+        return
+
+    result = creator.create_with_sequential_config(fingerprint)
+    if result:
+        profile_id = creator._extract_profile_id(result)
+        if profile_id:
+            cdp_port = ProfileCreator.generate_cdp_port()
+            print(f"🔌 Генерируем CDP порт: {cdp_port}")
+            start_result = client.start_profile(FOLDER_ID, profile_id, port=cdp_port)
+            if start_result:
+                print(f"   📊 Ответ сервера: {start_result}")
+                actual_port = start_result.get("port") or cdp_port
+                print(f"✅ Профиль запущен автоматически")
+                print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
+                run_tebor_py(profile_id, actual_port)
+            else:
+                print("⚠️  Профиль создан, но не удалось автоматически запустить")
+                print("   Проверьте:")
+                print("   - Запущен ли Browser Vision локальный сервер (127.0.0.1:3030)")
+                print("   - Правильный ли токен в config.py")
+
+
+def run_tebor_py(profile_id: str, port: int):
+    """Запускает tebor.py для профиля в отдельном окне"""
+    import socket
+    from pathlib import Path
+
+    run_tebor_path = Path(__file__).parent / "run_tebor.py"
+
+    print(f"   ⏳ Ожидание запуска профиля...")
+    for attempt in range(15):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(("127.0.0.1", port))
+            sock.close()
+            if result == 0:
+                print(f"   ✅ Порт {port} доступен (через {attempt + 1}s)")
+                break
+        except Exception as e:
+            pass
+        time.sleep(1)
+    else:
+        print(f"   ⚠️ Порт {port} недоступен, запустим без ожидания")
+
+    cmd = [
+        sys.executable,
+        str(run_tebor_path),
+        "--profile-id",
+        profile_id,
+        "--port",
+        str(port),
+        "--auto",
+    ]
+    print(f"   🚀 Запуск Selenium: {' '.join(cmd)}")
+    subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
 
 def create_batch_profiles(client, fg, creator):
-    """Создаёт несколько профилей"""
+    """Создаёт несколько профилей и автоматически запускает их"""
     print(f"\n🚀 Массовое создание в группу: {FOLDER_ID}")
     print("-" * 60)
 
@@ -120,19 +175,34 @@ def create_batch_profiles(client, fg, creator):
     print("🔌 Selenium CDP порты будут сгенерированы автоматически")
 
     confirm = input(f"\nСоздать {count} профилей? (y/n): ").strip().lower()
-    if confirm == "y":
-        creator.create_batch(
-            count=count,
-            webrtc_mode=MODES["AUTO"],
-            webgl_mode=MODES["MANUAL"],
-            canvas_mode=MODES["MANUAL"],
-            audio_mode=MODES["MANUAL"],
-            client_rects_mode=MODES["MANUAL"],
-            random_gpu=True,
-            random_webcam=True,
-        )
-    else:
+    if confirm != "y":
         print("⚠️  Создание отменено")
+        return
+
+    results = creator.create_batch(
+        count=count,
+        webrtc_mode=MODES["AUTO"],
+        webgl_mode=MODES["MANUAL"],
+        canvas_mode=MODES["MANUAL"],
+        audio_mode=MODES["MANUAL"],
+        client_rects_mode=MODES["MANUAL"],
+        random_gpu=True,
+        random_webcam=True,
+    )
+
+    for i, result in enumerate(results, 1):
+        if result:
+            profile_id = creator._extract_profile_id(result)
+            if profile_id:
+                cdp_port = ProfileCreator.generate_cdp_port()
+                print(f"\n[{i}/{count}] Запуск профиля {profile_id} на порту {cdp_port}")
+                start_result = client.start_profile(FOLDER_ID, profile_id, port=cdp_port)
+                if start_result:
+                    actual_port = start_result.get("port") or cdp_port
+                    print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
+                    run_tebor_py(profile_id, actual_port)
+                else:
+                    print(f"   ⚠️  Не удалось запустить")
 
 
 def show_variations(client, variation_type, title):
@@ -200,23 +270,16 @@ def start_profile_with_stored_port(client):
         return
 
     port = ProfileCreator.extract_debug_port(profile)
+    if not port:
+        port = ProfileCreator.generate_cdp_port()
+        print(f"🔌 Генерируем CDP порт: {port}")
+
     result = client.start_profile(FOLDER_ID, profile_id, port=port)
     if result:
         actual_port = result.get("port") or port
         print("✅ Профиль запущен")
         if actual_port:
             print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
-            # Запуск tebor.py в отдельном окне
-            cmd = [
-                sys.executable,
-                "tebor.py",
-                "--profile-id",
-                profile_id,
-                "--port",
-                str(actual_port),
-            ]
-            print(f"Запуск tebor.py: {' '.join(cmd)}")
-            subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
     else:
         print("❌ Не удалось запустить профиль")
 

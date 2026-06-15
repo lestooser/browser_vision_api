@@ -1,5 +1,6 @@
 import os
 import time
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
@@ -12,16 +13,13 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .photo_path import get_photo_path
-
-# ================== НАСТРОЙКИ ==================
-# LOGIN = "your_email_or_phone"  # Замените на свои данные
-# PASSWORD = "your_password"
-PHOTO_PATHS = get_photo_path(os.getenv("FOLDER_PHOTO_PATH"))
+from profile_script.photo_path import get_photo_path
 
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TOKEN_BOT")
 TELEGRAM_CHAT_ID = os.getenv("TG_CHAT_ID")
+PHOTO_PATHS = get_photo_path(os.getenv("FOLDER_PHOTO_PATH"))
 
 
 # ================== ФУНКЦИИ УВЕДОМЛЕНИЙ ==================
@@ -307,24 +305,15 @@ class TaborPhotoUploader:
 
 
 def start_connect(LOGIN, PASSWORD, PORT_NUMBER):
-    # 1. Запускаем профиль Vision на заданном порту
-    # 2. Подключаем Selenium к этому порту
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{PORT_NUMBER}")
-
-    # Автоматически подбираем chromedriver, совместимый с браузером Vision
     service = Service(r"C:\chromedriver_148\chromedriver-win64\chromedriver.exe")
-
     driver = webdriver.Chrome(service=service, options=options)
-
-    # 3. Проверка подключения
     driver.get("https://tabor.ru")
     print("✅ Selenium подключился, текущий URL:", driver.current_url)
 
     try:
         uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD)
-
-        # uploader.login(LOGIN, PASSWORD)
         input("Подтвердите авторизацию")
         time.sleep(2)
         uploader.go_to_photo_section()
@@ -337,24 +326,39 @@ def start_connect(LOGIN, PASSWORD, PORT_NUMBER):
         driver.quit()
 
 
+if __name__ == "__main__":
+    import argparse
 
-# ================== ЗАПУСК ==================
-# if __name__ == "__main__":
-#     # Настройка драйвера (пример для Chrome)
-#     options = webdriver.ChromeOptions()
-#     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{PORT_NUMBER}")
-#     # options.add_argument("--headless")  # если нужен headless, но тогда Turnstile не пройти
-#     driver = webdriver.Chrome(options=options)
-#     # try: openProfule()
-#     # except: pass
-#     try:
-#         uploader = TaborPhotoUploader(driver)
-#         uploader.login()
-#         uploader.go_to_photo_section()
-#         uploader.monitor_photos(PHOTO_PATHS)
-#     except Exception as e:
-#         print(f"Критическая ошибка: {e}")
-#         send_telegram(f"❌ Ошибка в скрипте: {e}")
-#     finally:
-#         input("Нажмите Enter для закрытия браузера...")
-#         driver.quit()
+    parser = argparse.ArgumentParser(description="Tabor photo uploader")
+    parser.add_argument("--profile-id", help="ID профиля")
+    parser.add_argument("--port", type=int, required=True, help="CDP порт")
+    parser.add_argument("--login", help="Логин")
+    parser.add_argument("--password", help="Пароль")
+    parser.add_argument("--auto", action="store_true", help="Автоматический режим без ввода")
+    args = parser.parse_args()
+
+    LOGIN = args.login or os.getenv("TABOR_LOGIN")
+    PASSWORD = args.password or os.getenv("TABOR_PASSWORD")
+
+    options = Options()
+    options.add_experimental_option("debuggerAddress", f"127.0.0.1:{args.port}")
+    service = Service(r"C:\chromedriver_148\chromedriver-win64\chromedriver.exe")
+
+    driver = webdriver.Chrome(service=service, options=options)
+    print(f"✅ Selenium подключился к профилю {args.profile_id or 'unknown'} на порту {args.port}")
+
+    try:
+        if args.auto and LOGIN and PASSWORD:
+            uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD)
+            uploader.login(LOGIN, PASSWORD)
+            uploader.go_to_photo_section()
+            uploader.monitor_photos(driver, PHOTO_PATHS)
+        else:
+            input("Нажмите Enter после готовности...")
+            driver.get("https://tabor.ru")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
+    finally:
+        if not args.auto:
+            input("Нажмите Enter для закрытия браузера...")
+        driver.quit()
