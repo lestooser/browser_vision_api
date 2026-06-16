@@ -10,6 +10,7 @@ from api_client import BrowserVisionClient
 from config import FOLDER_ID, MODES
 from fingerprint_generator import FingerprintGenerator
 from profile_creator import ProfileCreator
+from profile_script.tebor import start_connect
 
 
 def print_separator():
@@ -108,13 +109,15 @@ def create_single_profile(client, fg, creator):
             if start_result:
                 print(f"   📊 Ответ сервера: {start_result}")
                 actual_port = start_result.get("port") or cdp_port
-                print(f"✅ Профиль запущен автоматически")
+                print("✅ Профиль запущен автоматически")
                 print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
                 run_tebor_py(profile_id, actual_port)
             else:
                 print("⚠️  Профиль создан, но не удалось автоматически запустить")
                 print("   Проверьте:")
-                print("   - Запущен ли Browser Vision локальный сервер (127.0.0.1:3030)")
+                print(
+                    "   - Запущен ли Browser Vision локальный сервер (127.0.0.1:3030)"
+                )
                 print("   - Правильный ли токен в config.py")
 
 
@@ -125,7 +128,7 @@ def run_tebor_py(profile_id: str, port: int):
 
     run_tebor_path = Path(__file__).parent / "run_tebor.py"
 
-    print(f"   ⏳ Ожидание запуска профиля...")
+    print("   ⏳ Ожидание запуска профиля...")
     for attempt in range(15):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -135,7 +138,7 @@ def run_tebor_py(profile_id: str, port: int):
             if result == 0:
                 print(f"   ✅ Порт {port} доступен (через {attempt + 1}s)")
                 break
-        except Exception as e:
+        except Exception:
             pass
         time.sleep(1)
     else:
@@ -195,14 +198,18 @@ def create_batch_profiles(client, fg, creator):
             profile_id = creator._extract_profile_id(result)
             if profile_id:
                 cdp_port = ProfileCreator.generate_cdp_port()
-                print(f"\n[{i}/{count}] Запуск профиля {profile_id} на порту {cdp_port}")
-                start_result = client.start_profile(FOLDER_ID, profile_id, port=cdp_port)
+                print(
+                    f"\n[{i}/{count}] Запуск профиля {profile_id} на порту {cdp_port}"
+                )
+                start_result = client.start_profile(
+                    FOLDER_ID, profile_id, port=cdp_port
+                )
                 if start_result:
                     actual_port = start_result.get("port") or cdp_port
                     print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
                     run_tebor_py(profile_id, actual_port)
                 else:
-                    print(f"   ⚠️  Не удалось запустить")
+                    print("   ⚠️  Не удалось запустить")
 
 
 def show_variations(client, variation_type, title):
@@ -280,6 +287,7 @@ def start_profile_with_stored_port(client):
         print("✅ Профиль запущен")
         if actual_port:
             print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
+            return profile_id, actual_port
     else:
         print("❌ Не удалось запустить профиль")
 
@@ -399,7 +407,8 @@ def main():
                 show_running_profiles(client)
 
             elif choice == "10":
-                start_profile_with_stored_port(client)
+                _, port = start_profile_with_stored_port(client)
+                start_connect("1", "1", port)
 
             elif choice == "11":
                 stop_profile(client)
