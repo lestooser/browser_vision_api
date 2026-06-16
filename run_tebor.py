@@ -16,8 +16,6 @@ from selenium.webdriver.chrome.service import Service
 from profile_script.photo_path import get_photo_path
 from profile_script.tebor import TaborPhotoUploader
 
-PHOTO_PATHS = get_photo_path(os.getenv("FOLDER_PHOTO_PATH")) or []
-
 if __name__ == "__main__":
     import argparse
     import traceback
@@ -31,6 +29,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profile-name", help="Имя профиля для отображения", default=None
     )
+    parser.add_argument(
+        "--photo-folder", help="Путь к папке с фотографиями", default=None
+    )
 
     args = parser.parse_args()
 
@@ -43,9 +44,22 @@ if __name__ == "__main__":
     LOGIN = args.login or os.getenv("TABOR_LOGIN")
     PASSWORD = args.password or os.getenv("TABOR_PASSWORD")
 
-    print(
-        f"🚀 Запуск tebor.py: profile_id={args.profile_id}, port={args.port}, auto={args.auto}"
-    )
+    # Определяем папку с фото
+    if args.photo_folder:
+        photo_folder = args.photo_folder
+    else:
+        photo_folder = os.getenv("FOLDER_PHOTO_PATH")
+
+    if photo_folder:
+        PHOTO_PATHS = get_photo_path(photo_folder) or []
+        print(f"📁 Папка с фото: {photo_folder}")
+        print(f"🖼️  Найдено фото: {len(PHOTO_PATHS)}")
+    else:
+        PHOTO_PATHS = []
+        print("⚠️  Папка с фото не указана. Загрузка будет пропущена.")
+
+    if not PHOTO_PATHS:
+        print("❌ Нет фотографий для загрузки. Скрипт завершится после авторизации.")
 
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{args.port}")
@@ -57,28 +71,28 @@ if __name__ == "__main__":
             f"✅ Selenium подключился к профилю {args.profile_id or 'unknown'} на порту {args.port}"
         )
 
-        # Создаём uploader (без попытки автоматического логина)
         uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD)
 
         if args.auto:
             if LOGIN and PASSWORD:
-                # Полностью автоматический режим
                 uploader.login(LOGIN, PASSWORD)
-                uploader.go_to_photo_section()
-                uploader.monitor_photos(driver, PHOTO_PATHS)
+                if PHOTO_PATHS:
+                    # uploader.go_to_photo_section()
+                    uploader.monitor_photos(PHOTO_PATHS)  # исправлено
+                else:
+                    print("⚠️  Нет фото для загрузки.")
             else:
-                # Полуавтомат: ждём ручной авторизации
                 print("\n🔐 Отсутствуют логин/пароль. Перехожу в ручной режим.")
                 driver.get("https://tabor.ru")
-                print(
-                    "👆 Авторизуйтесь в браузере вручную, затем вернитесь в эту консоль и нажмите Enter."
-                )
+                print("👆 Авторизуйтесь вручную, затем нажмите Enter.")
                 input("⏎ Нажмите Enter после успешного входа...")
-                # Пользователь уже на сайте, можем сразу переходить в раздел фото
-                uploader.go_to_photo_section()
-                uploader.monitor_photos(driver, PHOTO_PATHS)
+                if PHOTO_PATHS:
+                    # uploader.go_to_photo_section()
+                    uploader.monitor_photos(PHOTO_PATHS)  # исправлено
+                else:
+                    print("⚠️  Нет фото для загрузки. Ожидание завершения.")
+                    input("Нажмите Enter для выхода...")
         else:
-            # Неавтоматический режим (без --auto): просто открыть браузер и ждать Ctrl+C
             driver.get("https://tabor.ru")
             print("✅ Браузер открыт на tabor.ru")
             print("Нажмите Ctrl+C для завершения.")

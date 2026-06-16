@@ -18,13 +18,31 @@ def print_separator():
     print("\n" + "=" * 60 + "\n")
 
 
+def api_retry(func, *args, max_retries=3, delay=2, **kwargs):
+    """
+    Вызывает func(*args, **kwargs) с повторными попытками при ошибках.
+    Используется для нестабильных GET-запросов к API.
+    """
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(
+                    f"⚠️  Ошибка запроса (попытка {attempt + 1}/{max_retries}): {e}. Повтор через {delay}с..."
+                )
+                time.sleep(delay)
+            else:
+                raise
+
+
 def show_current_folder_profiles(client):
     """Показывает профили в группе"""
     print("\n📂 Профили в группе")
     print(f"   ID группы: {FOLDER_ID}")
     print("-" * 60)
 
-    profiles_data = client.get_profiles(FOLDER_ID)
+    profiles_data = api_retry(client.get_profiles, FOLDER_ID)
     if not profiles_data:
         print("❌ Не удалось получить профили")
         return
@@ -109,7 +127,6 @@ def create_single_profile(client, fg, creator):
             if start_result:
                 print(f"   📊 Ответ сервера: {start_result}")
                 actual_port = start_result.get("port") or cdp_port
-                # Имя профиля берём из результата создания (если есть) или из ответа запуска
                 profile_name = (
                     result.get("profile_name")
                     or result.get("name")
@@ -127,12 +144,28 @@ def create_single_profile(client, fg, creator):
                 print("   - Правильный ли токен в config.py")
 
 
-def run_tebor_py(profile_id: str, port: int, profile_name: str = None):
+def ask_photo_folder(profile_name: str = None) -> str:
+    """Запрашивает у пользователя путь к папке с фото для профиля."""
+    name_hint = f' для профиля "{profile_name}"' if profile_name else ""
+    print()
+    print("📁 Укажите путь к папке с фотографиями" + name_hint)
+    print("   (оставьте пустым, чтобы использовать FOLDER_PHOTO_PATH из .env)")
+    folder = input("👉 Путь к папке: ").strip()
+    return folder if folder else None
+
+
+def run_tebor_py(
+    profile_id: str, port: int, profile_name: str = None, photo_folder: str = None
+):
     """Запускает tebor.py для профиля в отдельном окне"""
     import socket
     from pathlib import Path
 
     run_tebor_path = Path(__file__).parent / "run_tebor.py"
+
+    # Запрашиваем папку с фото, если не передана
+    if photo_folder is None:
+        photo_folder = ask_photo_folder(profile_name)
 
     print("   ⏳ Ожидание запуска профиля...")
     for attempt in range(15):
@@ -161,6 +194,12 @@ def run_tebor_py(profile_id: str, port: int, profile_name: str = None):
     ]
     if profile_name:
         cmd.extend(["--profile-name", profile_name])
+    if photo_folder:
+        cmd.extend(["--photo-folder", photo_folder])
+        print(f"   📁 Фото из папки: {photo_folder}")
+    else:
+        print("   📁 Фото из папки по умолчанию (FOLDER_PHOTO_PATH)")
+
     print(f"   🚀 Запуск Selenium: {' '.join(cmd)}")
     subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
@@ -185,6 +224,18 @@ def create_batch_profiles(client, fg, creator):
     print("🔌 Прокси будут взяты последовательно из config/proxy.txt")
     print("🔌 Selenium CDP порты будут сгенерированы автоматически")
 
+    # Спрашиваем про папку с фото: одну для всех или для каждого отдельно
+    print("\n📁 Настройка папок с фотографиями:")
+    print("   1. Одна папка для всех профилей")
+    print("   2. Разные папки (будет запрошено для каждого)")
+    folder_choice = input("👉 Выберите (1/2): ").strip()
+
+    common_photo_folder = None
+    if folder_choice == "1":
+        common_photo_folder = ask_photo_folder()
+    elif folder_choice != "2":
+        print("⚠️  Неверный выбор, будет запрошено для каждого профиля отдельно")
+
     confirm = input(f"\nСоздать {count} профилей? (y/n): ").strip().lower()
     if confirm != "y":
         print("⚠️  Создание отменено")
@@ -206,17 +257,24 @@ def create_batch_profiles(client, fg, creator):
             profile_id = creator._extract_profile_id(result)
             if profile_id:
                 cdp_port = ProfileCreator.generate_cdp_port()
+                profile_name = result.get("profile_name") or result.get("name")
                 print(
-                    f"\n[{i}/{count}] Запуск профиля {profile_id} на порту {cdp_port}"
+                    f'\n[{i}/{count}] Запуск профиля "{profile_name}" ({profile_id}) на порту {cdp_port}'
                 )
+
                 start_result = client.start_profile(
                     FOLDER_ID, profile_id, port=cdp_port
                 )
                 if start_result:
                     actual_port = start_result.get("port") or cdp_port
-                    profile_name = result.get("profile_name") or result.get("name")
                     print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
-                    run_tebor_py(profile_id, actual_port, profile_name)
+
+                    # Папка для этого профиля
+                    photo_folder = common_photo_folder
+                    if folder_choice == "2":
+                        photo_folder = ask_photo_folder(profile_name)
+
+                    run_tebor_py(profile_id, actual_port, profile_name, photo_folder)
                 else:
                     print("   ⚠️  Не удалось запустить")
 
@@ -229,9 +287,9 @@ def show_variations(client, variation_type, title):
     params = {}
     if variation_type == "renderer":
         params = {"os": "windows", "version": "latest"}
-        variations = client.get_variations("renderer", **params)
+        variations = api_retry(client.get_variations, variation_type, **params)
     else:
-        variations = client.get_variations(variation_type)
+        variations = api_retry(client.get_variations, variation_type)
 
     if not variations:
         print("❌ Не удалось получить список")
@@ -251,7 +309,7 @@ def show_running_profiles(client):
     print("\n🟢 Запущенные profiles")
     print("-" * 60)
 
-    profiles = client.get_running_profiles()
+    profiles = api_retry(client.get_running_profiles)
     if profiles is None:
         print("❌ Не удалось получить список запущенных профилей")
         return
@@ -353,10 +411,13 @@ def parse_selection(text: str, max_index: int) -> Optional[list]:
 
 
 def launch_selected_profiles(
-    client, selection_text: str, active_map: Dict[str, dict]
+    client,
+    selection_text: str,
+    active_map: Dict[str, dict],
+    common_photo_folder: str = None,
 ) -> bool:
     """Запускает несколько профилей из группы по номерам и сразу открывает tebor."""
-    profiles_data = client.get_profiles(FOLDER_ID)
+    profiles_data = api_retry(client.get_profiles, FOLDER_ID)
     if not profiles_data:
         print("❌ Не удалось получить профили")
         return False
@@ -368,6 +429,9 @@ def launch_selected_profiles(
     indices = parse_selection(selection_text, len(profiles))
     if indices is None:
         return False
+
+    # Если папка не общая, спросим для каждого
+    use_individual_folders = common_photo_folder is None
 
     launched_any = False
     for idx in indices:
@@ -390,7 +454,13 @@ def launch_selected_profiles(
             actual_port = start_result.get("port") or cdp_port
             active_map[profile_id] = {"port": actual_port, "name": name}
             print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
-            run_tebor_py(profile_id, actual_port, name)
+
+            # Папка для этого профиля
+            photo_folder = common_photo_folder
+            if use_individual_folders:
+                photo_folder = ask_photo_folder(name)
+
+            run_tebor_py(profile_id, actual_port, name, photo_folder)
             launched_any = True
         else:
             print("   ❌ Не удалось запустить")
@@ -416,13 +486,30 @@ def run_tebor_for_selected(selection_text: str, active_map: Dict[str, dict]) -> 
     if indices is None:
         return False
 
+    # Спрашиваем про папки
+    print("\n📁 Настройка папок с фотографиями:")
+    print("   1. Одна папка для всех выбранных профилей")
+    print("   2. Разные папки (будет запрошено для каждого)")
+    folder_choice = input("👉 Выберите (1/2): ").strip()
+
+    common_photo_folder = None
+    if folder_choice == "1":
+        common_photo_folder = ask_photo_folder()
+    elif folder_choice != "2":
+        print("⚠️  Неверный выбор, будет запрошено для каждого профиля отдельно")
+
     launched_any = False
     for idx in indices:
         pid, data = profiles[idx]
         port = data["port"]
         name = data["name"]
         print(f'\n🚀 Запускаем tebor для профиля "{name}" ({pid}) на порту {port}')
-        run_tebor_py(pid, port, name)
+
+        photo_folder = common_photo_folder
+        if folder_choice == "2":
+            photo_folder = ask_photo_folder(name)
+
+        run_tebor_py(pid, port, name, photo_folder)
         launched_any = True
     return launched_any
 
@@ -434,7 +521,7 @@ def menu_launch_multiple_profiles(client, active_map: Dict[str, dict]):
         print("📂 Профили в рабочей группе")
         print("-" * 60)
 
-        profiles_data = client.get_profiles(FOLDER_ID)
+        profiles_data = api_retry(client.get_profiles, FOLDER_ID)
         if not profiles_data:
             print("❌ Не удалось получить профили")
             return
@@ -452,7 +539,20 @@ def menu_launch_multiple_profiles(client, active_map: Dict[str, dict]):
         sel = input("👉 Номера: ").strip()
         if sel == "0":
             return
-        if launch_selected_profiles(client, sel, active_map):
+
+        # Спрашиваем про папки
+        print("\n📁 Настройка папок с фотографиями:")
+        print("   1. Одна папка для всех выбранных профилей")
+        print("   2. Разные папки (будет запрошено для каждого)")
+        folder_choice = input("👉 Выберите (1/2): ").strip()
+
+        common_photo_folder = None
+        if folder_choice == "1":
+            common_photo_folder = ask_photo_folder()
+        elif folder_choice != "2":
+            print("⚠️  Неверный выбор, будет запрошено для каждого профиля отдельно")
+
+        if launch_selected_profiles(client, sel, active_map, common_photo_folder):
             print("✅ Команда запуска выполнена")
 
 
@@ -487,7 +587,7 @@ def menu_stop_multiple(client):
         print("⛔ Остановка нескольких профилей")
         print("-" * 60)
 
-        profiles_data = client.get_profiles(FOLDER_ID)
+        profiles_data = api_retry(client.get_profiles, FOLDER_ID)
         if not profiles_data:
             print("❌ Не удалось получить профили")
             return
@@ -595,11 +695,11 @@ def main():
                 show_current_folder_profiles(client)
 
             elif choice == "2":
-                folders = client.get_folders()
+                folders = api_retry(client.get_folders)
                 if folders:
                     print(f"\n📁 Всего групп: {len(folders)}")
                     for folder in folders:
-                        count = client.get_profile_count(folder["id"])
+                        count = api_retry(client.get_profile_count, folder["id"])
                         marker = "✅" if folder["id"] == FOLDER_ID else "  "
                         print(f"{marker} {folder['folder_name']} ({count} профилей)")
                 else:
