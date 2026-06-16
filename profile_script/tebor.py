@@ -35,13 +35,13 @@ def send_telegram(message):
 
 # ================== ОСНОВНОЙ КЛАСС ==================
 class TaborPhotoUploader:
-    def __init__(self, driver, LOGIN, PASSWORD):
+    def __init__(self, driver, LOGIN=None, PASSWORD=None):
         self.driver = driver
         self.wait = WebDriverWait(driver, 20)
         self._login = LOGIN
         self._password = PASSWORD
 
-    def login(self, _login, _password):
+    def login(self, _login=None, _password=None):
         """Авторизация на сайте с ручным обходом Turnstile (один раз)"""
         self.driver.get("https://tabor.ru")
 
@@ -56,10 +56,12 @@ class TaborPhotoUploader:
         email_input = self.wait.until(
             EC.presence_of_element_located((By.ID, "session_user_login"))
         )
-        email_input.send_keys(_login)
+        if _login:
+            email_input.send_keys(_login)
 
         pass_input = self.driver.find_element(By.ID, "session_user_password")
-        pass_input.send_keys(_password)
+        if _password:
+            pass_input.send_keys(_password)
 
         # Ожидание ручного прохождения Cloudflare Turnstile
         input("👉 Пройдите капчу 'Я не робот' в браузере и нажмите Enter...")

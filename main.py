@@ -5,12 +5,12 @@
 import subprocess
 import sys
 import time
+from typing import Dict, Optional
 
 from api_client import BrowserVisionClient
 from config import FOLDER_ID, MODES
 from fingerprint_generator import FingerprintGenerator
 from profile_creator import ProfileCreator
-from profile_script.tebor import start_connect
 
 
 def print_separator():
@@ -109,9 +109,15 @@ def create_single_profile(client, fg, creator):
             if start_result:
                 print(f"   📊 Ответ сервера: {start_result}")
                 actual_port = start_result.get("port") or cdp_port
+                # Имя профиля берём из результата создания (если есть) или из ответа запуска
+                profile_name = (
+                    result.get("profile_name")
+                    or result.get("name")
+                    or start_result.get("profile_name")
+                )
                 print("✅ Профиль запущен автоматически")
                 print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
-                run_tebor_py(profile_id, actual_port)
+                run_tebor_py(profile_id, actual_port, profile_name)
             else:
                 print("⚠️  Профиль создан, но не удалось автоматически запустить")
                 print("   Проверьте:")
@@ -121,7 +127,7 @@ def create_single_profile(client, fg, creator):
                 print("   - Правильный ли токен в config.py")
 
 
-def run_tebor_py(profile_id: str, port: int):
+def run_tebor_py(profile_id: str, port: int, profile_name: str = None):
     """Запускает tebor.py для профиля в отдельном окне"""
     import socket
     from pathlib import Path
@@ -153,6 +159,8 @@ def run_tebor_py(profile_id: str, port: int):
         str(port),
         "--auto",
     ]
+    if profile_name:
+        cmd.extend(["--profile-name", profile_name])
     print(f"   🚀 Запуск Selenium: {' '.join(cmd)}")
     subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
@@ -206,8 +214,9 @@ def create_batch_profiles(client, fg, creator):
                 )
                 if start_result:
                     actual_port = start_result.get("port") or cdp_port
+                    profile_name = result.get("profile_name") or result.get("name")
                     print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
-                    run_tebor_py(profile_id, actual_port)
+                    run_tebor_py(profile_id, actual_port, profile_name)
                 else:
                     print("   ⚠️  Не удалось запустить")
 
@@ -239,7 +248,7 @@ def show_variations(client, variation_type, title):
 
 def show_running_profiles(client):
     """Показывает запущенные профили."""
-    print("\n🟢 Запущенные профили")
+    print("\n🟢 Запущенные profiles")
     print("-" * 60)
 
     profiles = client.get_running_profiles()
@@ -259,7 +268,7 @@ def show_running_profiles(client):
         )
 
 
-def ask_profile_id() -> Optional[str]:  # noqa: F821
+def ask_profile_id() -> Optional[str]:
     profile_id = input("\nID профиля: ").strip()
     return profile_id or None
 
@@ -269,12 +278,12 @@ def start_profile_with_stored_port(client):
     profile_id = ask_profile_id()
     if not profile_id:
         print("❌ ID профиля не указан")
-        return
+        return None
 
     profile = client.get_profile_by_id(FOLDER_ID, profile_id)
     if not profile:
         print("❌ Профиль не найден")
-        return
+        return None
 
     port = ProfileCreator.extract_debug_port(profile)
     if not port:
@@ -284,12 +293,14 @@ def start_profile_with_stored_port(client):
     result = client.start_profile(FOLDER_ID, profile_id, port=port)
     if result:
         actual_port = result.get("port") or port
+        profile_name = profile.get("profile_name", "N/A")
         print("✅ Профиль запущен")
         if actual_port:
             print(f"🔗 CDP URL: http://127.0.0.1:{actual_port}")
-            return profile_id, actual_port
+            return profile_id, actual_port, profile_name
     else:
         print("❌ Не удалось запустить профиль")
+    return None
 
 
 def stop_profile(client):
@@ -299,6 +310,215 @@ def stop_profile(client):
         print("❌ ID профиля не указан")
         return
 
+    result = client.stop_profile(FOLDER_ID, profile_id)
+    if result:
+        print("✅ Профиль остановлен")
+    else:
+        print("❌ Не удалось остановить профиль")
+
+
+def parse_selection(text: str, max_index: int) -> Optional[list]:
+    """Разбор пользовательского ввода '1,3-5,7' в список 0-based индексов."""
+    if not text.strip():
+        return None
+    selected = []
+    parts = text.split(",")
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            try:
+                start_str, end_str = part.split("-", 1)
+                start = int(start_str)
+                end = int(end_str)
+            except ValueError:
+                print(f"❌ Неверный диапазон: {part}")
+                return None
+            if start < 1 or end > max_index or start > end:
+                print(f"❌ Диапазон вне допустимых значений (1-{max_index}): {part}")
+                return None
+            selected.extend(list(range(start - 1, end)))
+        else:
+            try:
+                idx = int(part)
+            except ValueError:
+                print(f"❌ Неверный номер: {part}")
+                return None
+            if idx < 1 or idx > max_index:
+                print(f"❌ Номер вне диапазона (1-{max_index}): {idx}")
+                return None
+            selected.append(idx - 1)
+    return sorted(set(selected))
+
+
+def launch_selected_profiles(
+    client, selection_text: str, active_map: Dict[str, dict]
+) -> bool:
+    """Запускает несколько профилей из группы по номерам и сразу открывает tebor."""
+    profiles_data = client.get_profiles(FOLDER_ID)
+    if not profiles_data:
+        print("❌ Не удалось получить профили")
+        return False
+    profiles = profiles_data.get("items", [])
+    if not profiles:
+        print("⚠️  В группе нет профилей")
+        return False
+
+    indices = parse_selection(selection_text, len(profiles))
+    if indices is None:
+        return False
+
+    launched_any = False
+    for idx in indices:
+        profile = profiles[idx]
+        profile_id = profile.get("id")
+        name = profile.get("profile_name", "N/A")
+        if profile_id in active_map:
+            print(
+                f"\n⚠️  Профиль {idx + 1}. {name} ({profile_id}) уже запущен на порту {active_map[profile_id]['port']}"
+            )
+            continue
+
+        cdp_port = ProfileCreator.generate_cdp_port()
+        print(f"\n[{idx + 1}/{len(profiles)}] Запуск профиля {name}")
+        print(f"   ID: {profile_id}")
+        print(f"   Порт: {cdp_port}")
+
+        start_result = client.start_profile(FOLDER_ID, profile_id, port=cdp_port)
+        if start_result:
+            actual_port = start_result.get("port") or cdp_port
+            active_map[profile_id] = {"port": actual_port, "name": name}
+            print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
+            run_tebor_py(profile_id, actual_port, name)
+            launched_any = True
+        else:
+            print("   ❌ Не удалось запустить")
+    return launched_any
+
+
+def run_tebor_for_selected(selection_text: str, active_map: Dict[str, dict]) -> bool:
+    """Запускает tebor для уже запущенных профилей по номерам."""
+    if not active_map:
+        print("⚠️  Нет запущенных через эту сессию профилей")
+        return False
+
+    profiles = list(active_map.items())
+    numbered = "\n".join(
+        f"  {i}. {p[1]['name']} (порт {p[1]['port']}) — {p[0]}"
+        for i, p in enumerate(profiles)
+    )
+    print("\n🟢 Запущенные в этой сессии:")
+    print(numbered)
+    print(f"Всего: {len(profiles)}")
+
+    indices = parse_selection(selection_text, len(profiles))
+    if indices is None:
+        return False
+
+    launched_any = False
+    for idx in indices:
+        pid, data = profiles[idx]
+        port = data["port"]
+        name = data["name"]
+        print(f'\n🚀 Запускаем tebor для профиля "{name}" ({pid}) на порту {port}')
+        run_tebor_py(pid, port, name)
+        launched_any = True
+    return launched_any
+
+
+def menu_launch_multiple_profiles(client, active_map: Dict[str, dict]):
+    """Меню запуска нескольких профилей из текущей группы (с номерами)."""
+    while True:
+        print_separator()
+        print("📂 Профили в рабочей группе")
+        print("-" * 60)
+
+        profiles_data = client.get_profiles(FOLDER_ID)
+        if not profiles_data:
+            print("❌ Не удалось получить профили")
+            return
+        profiles = profiles_data.get("items", [])
+        total = profiles_data.get("total", 0)
+        print(f"📊 Всего: {total}\n")
+        for i, profile in enumerate(profiles, 1):
+            name = profile.get("profile_name", "N/A")
+            status = "🟢" if profile.get("running") else "⚫"
+            print(f"{i}. {status} {name}")
+
+        print()
+        print("Введите номера через запятую или диапазон (1-5, 7, 9-12)")
+        print("0 — назад")
+        sel = input("👉 Номера: ").strip()
+        if sel == "0":
+            return
+        if launch_selected_profiles(client, sel, active_map):
+            print("✅ Команда запуска выполнена")
+
+
+def menu_run_tebor_multiple(active_map: Dict[str, dict]):
+    """Меню запуска tebor для нескольких уже запущенных профилей."""
+    if not active_map:
+        print("⚠️  Нет запущенных через эту сессию профилей")
+        input("Enter для возврата...")
+        return
+    while True:
+        print_separator()
+        print("🚀 Запуск tebor для запущенных профилей")
+
+        profiles = list(active_map.items())
+        for i, (pid, data) in enumerate(profiles, 1):
+            print(f"{i}. {data['name']} (порт {data['port']}) — {pid}")
+
+        print()
+        print("Введите номера через запятую или диапазон")
+        print("0 — назад")
+        sel = input("👉 Номера: ").strip()
+        if sel == "0":
+            return
+        if run_tebor_for_selected(sel, active_map):
+            print("✅ tebor запущен(а)")
+
+
+def menu_stop_multiple(client):
+    """Меню остановки нескольких профилей из текущей группы."""
+    while True:
+        print_separator()
+        print("⛔ Остановка нескольких профилей")
+        print("-" * 60)
+
+        profiles_data = client.get_profiles(FOLDER_ID)
+        if not profiles_data:
+            print("❌ Не удалось получить профили")
+            return
+        profiles = profiles_data.get("items", [])
+        total = profiles_data.get("total", 0)
+        print(f"📊 Всего: {total}\n")
+        for i, profile in enumerate(profiles, 1):
+            name = profile.get("profile_name", "N/A")
+            status = "🟢" if profile.get("running") else "⚫"
+            print(f"{i}. {status} {name}")
+
+        print()
+        print("Введите номера через запятую или диапазон (1-5, 7, 9-12)")
+        print("0 — назад")
+        sel = input("👉 Номера: ").strip()
+        if sel == "0":
+            return
+
+        indices = parse_selection(sel, len(profiles))
+        if indices is None:
+            continue
+
+        for idx in indices:
+            profile = profiles[idx]
+            pid = profile.get("id")
+            name = profile.get("profile_name", "N/A")
+            print(f"\n⛔ Останавливаем {name} ({pid})...")
+            stop_profile_by_id(client, pid)
+
+
+def stop_profile_by_id(client, profile_id: str):
     result = client.stop_profile(FOLDER_ID, profile_id)
     if result:
         print("✅ Профиль остановлен")
@@ -336,6 +556,7 @@ def main():
         return
 
     creator = ProfileCreator(client, fg)
+    active_profiles: Dict[str, dict] = {}
 
     while True:
         print_separator()
@@ -358,6 +579,9 @@ def main():
         print("    9. Запущенные профили")
         print("    10. Запустить профиль с сохранённым портом")
         print("    11. Остановить профиль")
+        print("    12. Запустить несколько профилей")
+        print("    13. Запустить tebor для нескольких профилей")
+        print("    14. Остановить несколько профилей")
         print()
         print("  ⚙️  ДРУГОЕ:")
         print("    8. Проверить соединение")
@@ -407,11 +631,23 @@ def main():
                 show_running_profiles(client)
 
             elif choice == "10":
-                _, port = start_profile_with_stored_port(client)
-                start_connect("1", "1", port)
+                result = start_profile_with_stored_port(client)
+                if result:
+                    profile_id, port, name = result
+                    active_profiles[profile_id] = {"port": port, "name": name}
+                    print("▶️  Вы можете запустить tebor отдельно: main.py → пункт 13")
 
             elif choice == "11":
                 stop_profile(client)
+
+            elif choice == "12":
+                menu_launch_multiple_profiles(client, active_profiles)
+
+            elif choice == "13":
+                menu_run_tebor_multiple(active_profiles)
+
+            elif choice == "14":
+                menu_stop_multiple(client)
 
             elif choice == "0":
                 print("\n👋 До свидания!")
