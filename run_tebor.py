@@ -9,12 +9,23 @@ load_dotenv()
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import ctypes
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
 from profile_script.photo_path import get_photo_path
 from profile_script.tebor import TaborPhotoUploader
+
+
+def set_console_title(title: str):
+    """Устанавливает заголовок окна консоли."""
+    try:
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+    except:
+        pass
+
 
 if __name__ == "__main__":
     import argparse
@@ -37,6 +48,10 @@ if __name__ == "__main__":
 
     profile_id = args.profile_id or "unknown"
     profile_name = args.profile_name or "без имени"
+
+    title = f"Tebor - {profile_name} ({profile_id[:8]}...)"
+    set_console_title(title)
+
     print(
         f'🚀 Запуск tebor.py: профиль "{profile_name}" (ID: {profile_id}), порт: {args.port}, auto={args.auto}'
     )
