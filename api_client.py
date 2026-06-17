@@ -13,7 +13,9 @@ from config import API_BASE_URL, LOCAL_TOKEN, LOCAL_URL, TOKEN
 class BrowserVisionClient:
     """Клиент для взаимодействия с API Browser Vision"""
 
-    def __init__(self, token: str = TOKEN, local_token: str = LOCAL_TOKEN, debug: bool = False):
+    def __init__(
+        self, token: str = TOKEN, local_token: str = LOCAL_TOKEN, debug: bool = False
+    ):
         self.token = token
         self.local_token = local_token
         self.api_url = API_BASE_URL
@@ -28,6 +30,35 @@ class BrowserVisionClient:
         # транспортный прокси для самого API-клиента.
         self.session.trust_env = False
         self.session.headers.update(self.headers)
+
+    # В классе BrowserVisionClient добавьте этот метод:
+    # В api_client.py исправьте метод _make_request:
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> Optional[dict]:
+        """
+        Универсальный метод для прямых запросов к API.
+        Используется для эндпоинтов, которых нет в стандартных методах.
+        """
+        try:
+            url = (
+                f"{self.api_url}{endpoint}"  # Исправлено: self.base_url -> self.api_url
+            )
+            headers = {"Authorization": f"Bearer {self.token}"}
+
+            if method.upper() == "GET":
+                response = self.session.get(url, headers=headers, **kwargs)
+            elif method.upper() == "POST":
+                response = self.session.post(url, headers=headers, **kwargs)
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"⚠️  API ошибка: {response.status_code} - {response.text}")
+                return None
+        except Exception as e:
+            print(f"❌ Ошибка запроса к API: {e}")
+            return None
 
     def _request(self, method: str, url: str, **kwargs) -> Optional[Dict[str, Any]]:
         """Выполняет HTTP запрос с детальным логированием"""
@@ -182,8 +213,9 @@ class BrowserVisionClient:
     ) -> Optional[Dict]:
         """Запускает профиль через локальный API"""
         return self._local_request(
-            "POST", f"/start/{folder_id}/{profile_id}",
-            body={"args": [f"--remote-debugging-port={port}"]} if port else {}
+            "POST",
+            f"/start/{folder_id}/{profile_id}",
+            body={"args": [f"--remote-debugging-port={port}"]} if port else {},
         )
 
     def stop_profile(self, folder_id: str, profile_id: str) -> Optional[Dict]:
@@ -192,7 +224,28 @@ class BrowserVisionClient:
 
     def get_running_profiles(self) -> Optional[List[Dict]]:
         """Получает список запущенных профилей"""
-        return self._local_request("GET", "/running")
+        # Пробуем через основной API - получаем все профили в папке и фильтруем
+        try:
+            from config import FOLDER_ID
+
+            profiles_data = self.get_profiles(FOLDER_ID)
+            if profiles_data and "items" in profiles_data:
+                running = [p for p in profiles_data["items"] if p.get("running")]
+                return running
+        except:
+            pass
+
+        # Если не сработало, пробуем локальный эндпоинт
+        result = self._local_request("GET", "/running")
+        if result is not None:
+            if isinstance(result, list):
+                return result
+            elif isinstance(result, dict):
+                for key in ["profiles", "data", "items", "list"]:
+                    if key in result and isinstance(result[key], list):
+                        return result[key]
+
+        return None
 
     def _local_request(
         self, method: str, path: str, body: Optional[Dict] = None
@@ -201,7 +254,9 @@ class BrowserVisionClient:
         url = f"{self.local_url}{path}"
         headers = {"X-Token": self.local_token, "Content-Type": "application/json"}
         try:
-            response = requests.request(method, url, headers=headers, json=body, timeout=30)
+            response = requests.request(
+                method, url, headers=headers, json=body, timeout=30
+            )
             response.raise_for_status()
             return response.json() if response.text else None
         except requests.exceptions.RequestException as e:

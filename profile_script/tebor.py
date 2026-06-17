@@ -124,17 +124,17 @@ class TaborPhotoUploader:
                         "⚠️ Кнопка 'Сохранить' не появилась. Пробуем альтернативный способ..."
                     )
                     # Пытаемся загрузить тем же фото, но через клик по кнопке
-                    alt_result = self._do_upload_alt(photo_path)
-                    if alt_result["success"]:
-                        print("✅ Фото успешно загружено (альтернативный способ)!")
-                        self._close_upload_modal()
-                        return True
-                    else:
-                        print(
-                            f"❌ Альтернативный способ не сработал: {alt_result.get('error')}"
-                        )
-                        # Если альтернатива не помогла, продолжаем основной цикл
-                        continue
+                    # alt_result = self._do_upload_alt(photo_path)
+                    # if alt_result["success"]:
+                    #     print("✅ Фото успешно загружено (альтернативный способ)!")
+                    #     self._close_upload_modal()
+                    #     return True
+                    # else:
+                    #     print(
+                    #         f"❌ Альтернативный способ не сработал: {alt_result.get('error')}"
+                    #     )
+                    #     # Если альтернатива не помогла, продолжаем основной цикл
+                    #     continue
 
                 error_type = result.get("type", "unknown")
                 if error_type == "rate_limit":
@@ -166,12 +166,10 @@ class TaborPhotoUploader:
         return False
 
     def _do_upload(self, photo_path: str) -> dict:
-        """Основной способ загрузки с повторными попытками открытия модалки."""
-
-        # Пробуем открыть модалку с повторными попытками
+        """Основной способ загрузки."""
+        # Открываем модалку
         for attempt in range(3):
             try:
-                # Проверяем, что мы на странице галереи
                 if (
                     "photos" not in self.driver.current_url
                     and "gallery" not in self.driver.current_url
@@ -180,17 +178,18 @@ class TaborPhotoUploader:
                     self.go_to_photo_section()
                     time.sleep(2)
 
+                # Используем JS для клика
                 upload_btn = self.wait.until(
-                    EC.element_to_be_clickable(
+                    EC.presence_of_element_located(
                         (
                             By.CSS_SELECTOR,
                             "a.button.button_green[href='/photo_uploader/new']",
                         )
                     )
                 )
-                upload_btn.click()
+                self.driver.execute_script("arguments[0].click();", upload_btn)
                 print("Нажата кнопка 'Загрузить фото'")
-                time.sleep(1.5)
+                time.sleep(2)
 
                 self.wait.until(
                     EC.presence_of_element_located(
@@ -198,7 +197,14 @@ class TaborPhotoUploader:
                     )
                 )
                 print("Модальное окно открыто")
-                break  # Успех
+
+                # Ждем появления input
+                self.wait.until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "#fileupload_master")
+                    )
+                )
+                break
 
             except TimeoutException:
                 print(f"⚠️ Модальное окно не появилось (попытка {attempt + 1}/3)")
@@ -210,30 +216,37 @@ class TaborPhotoUploader:
                 else:
                     raise Exception("Не удалось открыть модальное окно после 3 попыток")
 
-        # Найти input и отправить файл (с повторными попытками)
+        # Найти и отправить файл
         file_input = None
         for attempt in range(3):
             try:
-                file_input = self._find_file_input()
+                file_input = self.driver.execute_script("""
+                    return document.querySelector('#fileupload_master');
+                """)
+
+                if not file_input:
+                    file_input = self._find_file_input()
+
                 if not file_input:
                     print(f"⚠️ Инпут не найден, попытка {attempt + 1}/3")
                     time.sleep(1)
                     continue
 
                 self._make_input_visible(file_input)
-                file_input.send_keys(os.path.abspath(photo_path))
-                print(
-                    f"📤 Файл {os.path.basename(photo_path)} отправлен через send_keys"
-                )
+                abs_path = os.path.abspath(photo_path)
+                file_input.send_keys(abs_path)
+                print(f"📤 Файл {os.path.basename(photo_path)} отправлен")
                 break
+
             except Exception as e:
                 print(f"⚠️ Ошибка отправки (попытка {attempt + 1}/3): {e}")
                 time.sleep(1)
                 continue
         else:
-            # Если send_keys не сработал — пробуем через JS
             try:
-                file_input = self._find_file_input()
+                file_input = self.driver.execute_script("""
+                    return document.querySelector('#fileupload_master');
+                """)
                 if file_input:
                     self.driver.execute_script(
                         """
@@ -241,165 +254,138 @@ class TaborPhotoUploader:
                         arguments[0].style.visibility = 'visible';
                         arguments[0].value = arguments[1];
                         arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-                        """,
+                    """,
                         file_input,
                         os.path.abspath(photo_path).replace("\\", "/"),
                     )
                     print("📤 Файл отправлен через JS")
                 else:
-                    raise Exception("Инпут не найден даже для JS")
+                    raise Exception("Инпут не найден")
             except Exception as e:
                 raise Exception(f"Не удалось отправить файл: {e}")
 
-        # Нажать "Сохранить"
-        try:
-            save_btn = WebDriverWait(self.driver, 20).until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "#crop_action > input.button.button_green")
-                )
-            )
+        # Ждем появления кнопки "Сохранить" - УЛУЧШЕННАЯ ВЕРСИЯ
+        print("⏳ Ожидание кнопки 'Сохранить'...")
+
+        save_btn = None
+        save_selectors = [
+            "#crop_action > input.button.button_green",
+            "input.button_green[name='commit']",
+            ".photos_second_step_action input.button_green",
+            "input[value='Сохранить']",
+            "button:contains('Сохранить')",
+            "//input[@value='Сохранить']",
+        ]
+
+        for selector in save_selectors:
+            try:
+                if selector.startswith("//"):
+                    # XPath
+                    save_btn = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                else:
+                    # CSS
+                    save_btn = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+
+                if save_btn and save_btn.is_displayed() and save_btn.is_enabled():
+                    print(f"✅ Найдена кнопка 'Сохранить' по селектору: {selector}")
+                    break
+            except:
+                continue
+        else:
+            # Если кнопка не найдена, пробуем найти через JS
+            try:
+                save_btn = self.driver.execute_script("""
+                    return document.querySelector('#crop_action input.button_green') ||
+                        document.querySelector('input.button_green[name="commit"]') ||
+                        document.querySelector('input[value="Сохранить"]') ||
+                        Array.from(document.querySelectorAll('input')).find(el => el.value === 'Сохранить');
+                """)
+                if save_btn:
+                    print("✅ Найдена кнопка 'Сохранить' через JS")
+            except:
+                pass
+
+        if save_btn:
+            # Кликаем через JS
             self.driver.execute_script("arguments[0].click();", save_btn)
             print("✅ Кнопка 'Сохранить' нажата через JS")
-        except TimeoutException:
-            # Запасной селектор
+
+            # Ждем 5 секунд
+            print("⏳ Ждём 5 секунд после нажатия 'Сохранить'...")
+            time.sleep(5)
+
+            # Закрываем модалку
+            self._close_upload_modal()
+
+            # Обновляем страницу
+            print("🔄 Обновляем страницу...")
+            self.driver.refresh()
+            time.sleep(3)
+
+            return {"success": True, "error": "", "type": "success"}
+        else:
+            print("⚠️ Кнопка 'Сохранить' не найдена")
+
+            # Проверяем, может фото уже загрузилось без кнопки
             try:
-                save_btn = WebDriverWait(self.driver, 5).until(
-                    EC.element_to_be_clickable(
-                        (By.CSS_SELECTOR, "input.button_green[name='commit']")
-                    )
+                # Проверяем, есть ли прогресс-бар 100%
+                progress = self.driver.find_element(
+                    By.CSS_SELECTOR, ".progressbar__status"
                 )
-                self.driver.execute_script("arguments[0].click();", save_btn)
-                print("✅ Кнопка 'Сохранить' нажата через JS (запасной селектор)")
-            except TimeoutException:
-                print("⚠️ Кнопка 'Сохранить' не появилась")
-                return {
-                    "success": False,
-                    "error": "Кнопка не появилась",
-                    "type": "no_save_button",
-                }
+                if "100%" in progress.text:
+                    print("✅ Прогресс 100%, загрузка завершена")
+                    time.sleep(2)
+                    self._close_upload_modal()
+                    self.driver.refresh()
+                    time.sleep(3)
+                    return {"success": True, "error": "", "type": "success"}
+            except:
+                pass
 
-        # Ждём 5 секунд
-        print("⏳ Ждём 5 секунд после нажатия 'Сохранить'...")
-        time.sleep(5)
-
-        # Закрываем модалку
-        self._close_upload_modal()
-
-        # Обновляем страницу
-        print("🔄 Обновляем страницу...")
-        self.driver.refresh()
-        time.sleep(3)
-
-        return {"success": True, "error": "", "type": "success"}
-
-    def _do_upload_alt(self, photo_path: str) -> dict:
-        """Альтернативный способ загрузки."""
-        # 1. Обновляем страницу
-        print("🔄 Обновляем страницу для альтернативного способа...")
-        self.driver.refresh()
-        time.sleep(3)
-
-        # 2. Открываем модалку
-        upload_btn = self.wait.until(
-            EC.element_to_be_clickable(
-                (By.CSS_SELECTOR, "a.button.button_green[href='/photo_uploader/new']")
-            )
-        )
-        upload_btn.click()
-        time.sleep(1.5)
-
-        self.wait.until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".arcticmodal-container"))
-        )
-
-        # 3. Нажимаем кнопку «Выбрать файл» через JS
-        try:
-            choose_btn = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located(
-                    (
-                        By.CSS_SELECTOR,
-                        "div.modal__body.clearfix.photos_first_step_action > div > div:nth-child(6) > button",
-                    )
-                )
-            )
-            self.driver.execute_script("arguments[0].click();", choose_btn)
-            print("✅ Кнопка 'Выбрать файл' нажата через JS")
-        except TimeoutException:
-            print("⚠️ Кнопка 'Выбрать файл' не найдена")
             return {
                 "success": False,
-                "error": "Кнопка 'Выбрать файл' не найдена",
-                "type": "alt_failed",
+                "error": "Кнопка 'Сохранить' не появилась",
+                "type": "no_save_button",
             }
-
-        time.sleep(1)
-
-        # 4. Найти input и отправить файл
-        file_input = self._find_file_input()
-        if not file_input:
-            return {"success": False, "error": "Input не найден", "type": "alt_failed"}
-
-        self._make_input_visible(file_input)
-        file_input.send_keys(os.path.abspath(photo_path))
-        print(
-            f"📤 Файл {os.path.basename(photo_path)} отправлен через альтернативный способ"
-        )
-
-        # 5. Нажать "Сохранить"
-        try:
-            save_btn = WebDriverWait(self.driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "#crop_action > input.button.button_green")
-                )
-            )
-            self.driver.execute_script("arguments[0].click();", save_btn)
-            print("✅ Кнопка 'Сохранить' нажата через JS (альтернативный способ)")
-        except TimeoutException:
-            print("⚠️ Кнопка 'Сохранить' не появилась (альтернативный способ)")
-            return {
-                "success": False,
-                "error": "Кнопка не появилась",
-                "type": "alt_failed",
-            }
-
-        # 6. Ждём 5 секунд, закрываем модалку, обновляем страницу
-        print("⏳ Ждём 5 секунд...")
-        time.sleep(5)
-        self._close_upload_modal()
-        print("🔄 Обновляем страницу...")
-        self.driver.refresh()
-        time.sleep(3)
-
-        return {"success": True, "error": "", "type": "success"}
 
     def _find_file_input(self):
         """Находит input для загрузки файла"""
-        selectors = [
-            # "#fileupload_master",
-            ".modal input[type='file']",
-            "#fileupload_master-styler input[type='file']",
-            "input[name='files[]']",
-            "input[type='file'][self_photo='true']",
-            ".arcticmodal-container input[type='file']",
+        # Пробуем разные способы
+        methods = [
+            # 1. Прямой поиск по ID
+            lambda: self.driver.find_element(By.CSS_SELECTOR, "#fileupload_master"),
+            # 2. Через JS
+            lambda: self.driver.execute_script(
+                "return document.querySelector('#fileupload_master');"
+            ),
+            # 3. По name
+            lambda: self.driver.find_element(By.CSS_SELECTOR, "input[name='files[]']"),
+            # 4. По атрибуту self_photo
+            lambda: self.driver.find_element(
+                By.CSS_SELECTOR, "input[type='file'][self_photo='true']"
+            ),
+            # 5. Все file inputs
+            lambda: (
+                self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")[0]
+                if self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                else None
+            ),
         ]
-        for selector in selectors:
+
+        for method in methods:
             try:
-                element = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if element and element.is_enabled():
-                    print(f"✅ Input найден по селектору: {selector}")
+                element = method()
+                if element:
+                    print("✅ Input найден")
+                    self._make_input_visible(element)
                     return element
-            except:
+            except Exception:
                 continue
-        try:
-            all_inputs = self.driver.find_elements(
-                By.CSS_SELECTOR, "input[type='file']"
-            )
-            for inp in all_inputs:
-                if inp.is_enabled():
-                    print("✅ Input найден через поиск всех file inputs")
-                    return inp
-        except:
-            pass
+
         return None
 
     # def _click_save_button(self):
@@ -430,7 +416,7 @@ class TaborPhotoUploader:
     #     return self._wait_for_upload_result(timeout=45)
 
     def _make_input_visible(self, element):
-        """Делает input видимым"""
+        """Делает input видимым, убирая все скрывающие стили"""
         self.driver.execute_script(
             """
             arguments[0].style.display = 'block';
@@ -439,80 +425,112 @@ class TaborPhotoUploader:
             arguments[0].style.position = 'relative';
             arguments[0].style.height = 'auto';
             arguments[0].style.width = 'auto';
-            arguments[0].style.zIndex = '9999';
+            arguments[0].style.zIndex = '99999';
             arguments[0].style.pointerEvents = 'auto';
+            arguments[0].style.overflow = 'visible';
+            arguments[0].style.clip = 'auto';
+            arguments[0].style.margin = '10px';
+            arguments[0].style.padding = '10px';
+            arguments[0].style.border = '2px solid red';
+            arguments[0].style.background = 'white';
             arguments[0].removeAttribute('disabled');
             arguments[0].removeAttribute('hidden');
-            arguments[0].setAttribute('style', 'display: block !important; visibility: visible !important; opacity: 1 !important; position: relative !important; z-index: 9999 !important;');
-            """,
+            arguments[0].removeAttribute('class');
+            arguments[0].className = '';
+            // Убираем !important через установку атрибута
+            arguments[0].setAttribute('style',
+                'display: block !important; ' +
+                'visibility: visible !important; ' +
+                'opacity: 1 !important; ' +
+                'position: relative !important; ' +
+                'z-index: 99999 !important; ' +
+                'height: auto !important; ' +
+                'width: auto !important; ' +
+                'pointer-events: auto !important; ' +
+                'margin: 10px !important; ' +
+                'padding: 10px !important; ' +
+                'border: 2px solid red !important; ' +
+                'background: white !important;'
+            );
+            // Создаем событие, чтобы браузер понял, что элемент изменился
+            arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+            arguments[0].dispatchEvent(new Event('click', { bubbles: true }));
+        """,
             element,
         )
+        time.sleep(0.5)  # Даем время на применение стилей
 
     def _wait_for_upload_result(self, timeout: int = 45) -> dict:
-        """Ожидает завершения загрузки, отслеживает ошибки."""
-        result = {"success": False, "error": "", "type": "unknown"}
+        """Ожидает завершения загрузки."""
         start = time.time()
 
         while time.time() - start < timeout:
-            # 1. Проверяем ошибки в списке загрузки
-            error_items = self.driver.find_elements(
-                By.CSS_SELECTOR, ".upload__item_err"
-            )
-            for item in error_items:
-                text = item.text.lower()
-                if "слишком часто" in text or "10 минут" in text:
-                    return {"success": False, "error": text, "type": "rate_limit"}
-                if "уже существует" in text or "дубликат" in text:
-                    return {"success": False, "error": text, "type": "duplicate"}
-                if "качество" in text or "плохо" in text:
-                    return {"success": False, "error": text, "type": "quality"}
-                return {"success": False, "error": text, "type": "unknown"}
-
-            # 2. Системные ошибки
             try:
-                sys_error = self.driver.find_element(
-                    By.CSS_SELECTOR, ".system__msg_err:not(.hidden)"
+                # Проверяем наличие кнопки "Сохранить" - если есть, нажимаем
+                save_btns = self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "#crop_action > input.button.button_green, input.button_green[name='commit']",
                 )
-                if sys_error.is_displayed():
-                    return {
-                        "success": False,
-                        "error": sys_error.text,
-                        "type": "system",
-                    }
-            except NoSuchElementException:
-                pass
 
-            # 3. Шаг "Завершить" = успех
-            try:
-                last_step = self.driver.find_element(
-                    By.CSS_SELECTOR, ".photos_last_step_action:not(.hidden)"
-                )
-                if last_step.is_displayed():
-                    uploaded = self.driver.find_elements(
-                        By.CSS_SELECTOR,
-                        ".upload__list .upload__item:not(.upload__item_err)",
-                    )
-                    if uploaded:
+                for btn in save_btns:
+                    if btn.is_displayed() and btn.is_enabled():
+                        print("✅ Найдена кнопка 'Сохранить', нажимаем...")
+                        self.driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(2)
                         return {"success": True, "error": "", "type": "success"}
-            except NoSuchElementException:
+            except:
                 pass
 
-            # 4. Прогресс-бар 100%
+            # Проверяем ошибки
+            try:
+                error_items = self.driver.find_elements(
+                    By.CSS_SELECTOR, ".upload__item_err"
+                )
+                for item in error_items:
+                    text = item.text.lower()
+                    if "слишком часто" in text or "10 минут" in text:
+                        return {"success": False, "error": text, "type": "rate_limit"}
+                    if "уже существует" in text or "дубликат" in text:
+                        return {"success": False, "error": text, "type": "duplicate"}
+                    if "качество" in text or "плохо" in text:
+                        return {"success": False, "error": text, "type": "quality"}
+            except:
+                pass
+
+            # Проверяем прогресс
             try:
                 progress = self.driver.find_element(
-                    By.CSS_SELECTOR, ".photos_second_step_action:not(.hidden)"
+                    By.CSS_SELECTOR, ".progressbar__status"
                 )
-                if progress.is_displayed():
-                    pbar = self.driver.find_element(
-                        By.CSS_SELECTOR, ".progressbar__status"
-                    )
-                    if "100%" in pbar.text:
-                        time.sleep(1)
-                        continue
-            except NoSuchElementException:
+                if "100%" in progress.text:
+                    print("✅ Прогресс 100%")
+                    time.sleep(2)
+                    # Проверяем, появилась ли кнопка завершения
+                    try:
+                        last_step = self.driver.find_element(
+                            By.CSS_SELECTOR, ".photos_last_step_action:not(.hidden)"
+                        )
+                        if last_step.is_displayed():
+                            return {"success": True, "error": "", "type": "success"}
+                    except:
+                        pass
+                    return {"success": True, "error": "", "type": "success"}
+            except:
                 pass
 
-            time.sleep(1)
+            # Проверяем, закрылось ли модальное окно (успех)
+            try:
+                modal = self.driver.find_element(
+                    By.CSS_SELECTOR, ".arcticmodal-container"
+                )
+                if not modal.is_displayed():
+                    print("✅ Модальное окно закрыто - загрузка завершена")
+                    return {"success": True, "error": "", "type": "success"}
+            except:
+                # Модального окна нет - возможно загрузка завершена
+                pass
+
+            time.sleep(2)
 
         return {"success": False, "error": "Таймаут", "type": "timeout"}
 
@@ -536,6 +554,24 @@ class TaborPhotoUploader:
             time.sleep(0.5)
         except Exception:
             pass
+
+    def _check_upload_completed(self) -> bool:
+        """Проверяет, завершена ли загрузка."""
+        try:
+            # Проверяем наличие новых фото в галерее
+            photos = self._get_gallery_photos()
+            if photos:
+                # Проверяем статус последнего фото
+                status = self._get_photo_status(photos[-1])
+                if status in [
+                    self.STATUS_MAIN,
+                    self.STATUS_BLOCKED,
+                    self.STATUS_PENDING,
+                ]:
+                    return True
+        except:
+            pass
+        return False
 
     def _make_input_visible(self, element):
         """Делает input видимым"""

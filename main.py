@@ -305,25 +305,54 @@ def show_variations(client, variation_type, title):
 
 
 def show_running_profiles(client):
-    """Показывает запущенные профили."""
-    print("\n🟢 Запущенные profiles")
+    """Показывает запущенные профили через /running."""
+    print("\n🟢 Запущенные профили")
     print("-" * 60)
 
-    profiles = api_retry(client.get_running_profiles)
-    if profiles is None:
-        print("❌ Не удалось получить список запущенных профилей")
-        return
+    try:
+        # Прямой запрос к /running
+        result = client._local_request("GET", "/running")
 
-    if not profiles:
-        print("⚠️  Запущенных профилей нет")
-        return
+        if result is None:
+            print("❌ Не удалось получить список запущенных профилей")
+            return
 
-    for profile in profiles:
-        print(
-            f"• {profile.get('profile_id', 'N/A')} "
-            f"folder={profile.get('folder_id', 'N/A')} "
-            f"port={profile.get('port', 'N/A')}"
-        )
+        # result может быть списком или словарем
+        if isinstance(result, list):
+            running_profiles = result
+        elif isinstance(result, dict):
+            # Проверяем разные возможные ключи
+            if "profiles" in result:
+                running_profiles = result["profiles"]
+            elif "data" in result:
+                running_profiles = result["data"]
+            elif "items" in result:
+                running_profiles = result["items"]
+            else:
+                running_profiles = [result]  # Если это один профиль
+        else:
+            running_profiles = []
+
+        if not running_profiles:
+            print("⚠️  Запущенных профилей нет")
+            return
+
+        print(f"📊 Найдено запущенных: {len(running_profiles)}\n")
+        for i, profile in enumerate(running_profiles, 1):
+            # Пробуем разные варианты полей
+            name = profile.get("profile_name") or profile.get("name", "N/A")
+            profile_id = profile.get("profile_id") or profile.get("id", "N/A")
+            folder_id = profile.get("folder_id") or profile.get("folderId", "N/A")
+            port = profile.get("port", "N/A")
+
+            print(f"{i}. {name}")
+            print(f"   ID: {profile_id}")
+            print(f"   Папка: {folder_id}")
+            print(f"   Порт: {port}")
+            print()
+
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
 
 
 def ask_profile_id() -> Optional[str]:
@@ -587,43 +616,97 @@ def menu_stop_multiple(client):
         print("⛔ Остановка нескольких профилей")
         print("-" * 60)
 
-        profiles_data = api_retry(client.get_profiles, FOLDER_ID)
-        if not profiles_data:
-            print("❌ Не удалось получить профили")
+        # Получаем запущенные профили через /running
+        result = client._local_request("GET", "/running")
+
+        if result is None:
+            print("❌ Не удалось получить список запущенных профилей")
             return
-        profiles = profiles_data.get("items", [])
-        total = profiles_data.get("total", 0)
-        print(f"📊 Всего: {total}\n")
-        for i, profile in enumerate(profiles, 1):
-            name = profile.get("profile_name", "N/A")
-            status = "🟢" if profile.get("running") else "⚫"
-            print(f"{i}. {status} {name}")
+
+        # Преобразуем в список
+        if isinstance(result, list):
+            running_profiles = result
+        elif isinstance(result, dict):
+            if "profiles" in result:
+                running_profiles = result["profiles"]
+            elif "data" in result:
+                running_profiles = result["data"]
+            elif "items" in result:
+                running_profiles = result["items"]
+            else:
+                running_profiles = [result]
+        else:
+            running_profiles = []
+
+        if not running_profiles:
+            print("⚠️  Нет запущенных профилей")
+            input("\nНажмите Enter для возврата...")
+            return
+
+        print(f"📊 Найдено запущенных: {len(running_profiles)}\n")
+        for i, profile in enumerate(running_profiles, 1):
+            name = profile.get("profile_name") or profile.get("name", "N/A")
+            profile_id = profile.get("profile_id") or profile.get("id", "N/A")
+            print(f"{i}. 🟢 {name} (ID: {profile_id})")
 
         print()
         print("Введите номера через запятую или диапазон (1-5, 7, 9-12)")
         print("0 — назад")
         sel = input("👉 Номера: ").strip()
+
         if sel == "0":
             return
 
-        indices = parse_selection(sel, len(profiles))
+        indices = parse_selection(sel, len(running_profiles))
         if indices is None:
             continue
 
+        stopped_count = 0
         for idx in indices:
-            profile = profiles[idx]
-            pid = profile.get("id")
-            name = profile.get("profile_name", "N/A")
-            print(f"\n⛔ Останавливаем {name} ({pid})...")
-            stop_profile_by_id(client, pid)
+            if idx >= len(running_profiles):
+                print(f"⚠️  Номер {idx + 1} вне диапазона")
+                continue
+
+            profile = running_profiles[idx]
+            profile_id = profile.get("profile_id") or profile.get("id")
+            name = profile.get("profile_name") or profile.get("name", "N/A")
+
+            print(f"\n⛔ Останавливаем {name} ({profile_id})...")
+
+            result = client.stop_profile(FOLDER_ID, profile_id)
+            if result is not None:
+                print("   ✅ Остановлен")
+                stopped_count += 1
+            else:
+                print("   ❌ Не удалось остановить")
+
+        if stopped_count > 0:
+            print(f"\n✅ Успешно остановлено профилей: {stopped_count}")
+        else:
+            print("\n❌ Не удалось остановить ни одного профиля")
+
+        input("\nНажмите Enter для продолжения...")
 
 
-def stop_profile_by_id(client, profile_id: str):
-    result = client.stop_profile(FOLDER_ID, profile_id)
-    if result:
-        print("✅ Профиль остановлен")
-    else:
-        print("❌ Не удалось остановить профиль")
+def stop_profile_by_id(client, profile_id: str) -> bool:
+    """
+    Останавливает профиль по его ID через API Browser.vision.
+    URL: GET /stop/{folderId}/{profileId}
+    """
+    try:
+        # Формируем URL для остановки
+        url = f"/stop/{FOLDER_ID}/{profile_id}"
+        response = client._make_request("GET", url)
+
+        if response is not None:
+            print(f"   ✅ Профиль {profile_id} остановлен")
+            return True
+        else:
+            print(f"   ❌ Не удалось остановить профиль {profile_id}")
+            return False
+    except Exception as e:
+        print(f"   ❌ Ошибка при остановке профиля {profile_id}: {e}")
+        return False
 
 
 def main():
