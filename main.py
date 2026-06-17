@@ -252,31 +252,31 @@ def create_batch_profiles(client, fg, creator):
         random_webcam=True,
     )
 
-    for i, result in enumerate(results, 1):
-        if result:
-            profile_id = creator._extract_profile_id(result)
-            if profile_id:
-                cdp_port = ProfileCreator.generate_cdp_port()
-                profile_name = result.get("profile_name") or result.get("name")
-                print(
-                    f'\n[{i}/{count}] Запуск профиля "{profile_name}" ({profile_id}) на порту {cdp_port}'
-                )
+    # for i, result in enumerate(results, 1):
+    #     if result:
+    #         profile_id = creator._extract_profile_id(result)
+    #         if profile_id:
+    #             cdp_port = ProfileCreator.generate_cdp_port()
+    #             profile_name = result.get("profile_name") or result.get("name")
+    #             print(
+    #                 f'\n[{i}/{count}] Запуск профиля "{profile_name}" ({profile_id}) на порту {cdp_port}'
+    #             )
 
-                start_result = client.start_profile(
-                    FOLDER_ID, profile_id, port=cdp_port
-                )
-                if start_result:
-                    actual_port = start_result.get("port") or cdp_port
-                    print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
+    #             start_result = client.start_profile(
+    #                 FOLDER_ID, profile_id, port=cdp_port
+    #             )
+    #             if start_result:
+    #                 actual_port = start_result.get("port") or cdp_port
+    #                 print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
 
-                    # Папка для этого профиля
-                    photo_folder = common_photo_folder
-                    if folder_choice == "2":
-                        photo_folder = ask_photo_folder(profile_name)
+    #                 # Папка для этого профиля
+    #                 photo_folder = common_photo_folder
+    #                 if folder_choice == "2":
+    #                     photo_folder = ask_photo_folder(profile_name)
 
-                    run_tebor_py(profile_id, actual_port, profile_name, photo_folder)
-                else:
-                    print("   ⚠️  Не удалось запустить")
+    #                 run_tebor_py(profile_id, actual_port, profile_name, photo_folder)
+    #             else:
+    #                 print("   ⚠️  Не удалось запустить")
 
 
 def show_variations(client, variation_type, title):
