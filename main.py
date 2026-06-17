@@ -304,55 +304,24 @@ def show_variations(client, variation_type, title):
         print(f"\n  ... и ещё {len(variations) - 30}")
 
 
-def show_running_profiles(client):
-    """Показывает запущенные профили через /running."""
+def show_running_profiles(client, active_profiles: Dict[str, dict]):
+    """Показывает запущенные профили из active_profiles."""
     print("\n🟢 Запущенные профили")
     print("-" * 60)
 
-    try:
-        # Прямой запрос к /running
-        result = client._local_request("GET", "/running")
+    if not active_profiles:
+        print("⚠️  Нет запущенных профилей")
+        print("   Используйте пункт 12 для запуска профилей")
+        return
 
-        if result is None:
-            print("❌ Не удалось получить список запущенных профилей")
-            return
-
-        # result может быть списком или словарем
-        if isinstance(result, list):
-            running_profiles = result
-        elif isinstance(result, dict):
-            # Проверяем разные возможные ключи
-            if "profiles" in result:
-                running_profiles = result["profiles"]
-            elif "data" in result:
-                running_profiles = result["data"]
-            elif "items" in result:
-                running_profiles = result["items"]
-            else:
-                running_profiles = [result]  # Если это один профиль
-        else:
-            running_profiles = []
-
-        if not running_profiles:
-            print("⚠️  Запущенных профилей нет")
-            return
-
-        print(f"📊 Найдено запущенных: {len(running_profiles)}\n")
-        for i, profile in enumerate(running_profiles, 1):
-            # Пробуем разные варианты полей
-            name = profile.get("profile_name") or profile.get("name", "N/A")
-            profile_id = profile.get("profile_id") or profile.get("id", "N/A")
-            folder_id = profile.get("folder_id") or profile.get("folderId", "N/A")
-            port = profile.get("port", "N/A")
-
-            print(f"{i}. {name}")
-            print(f"   ID: {profile_id}")
-            print(f"   Папка: {folder_id}")
-            print(f"   Порт: {port}")
-            print()
-
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
+    print(f"📊 Найдено запущенных: {len(active_profiles)}\n")
+    for i, (profile_id, data) in enumerate(active_profiles.items(), 1):
+        name = data.get("name", "N/A")
+        port = data.get("port", "N/A")
+        print(f"{i}. {name}")
+        print(f"   ID: {profile_id}")
+        print(f"   Порт: {port}")
+        print()
 
 
 def ask_profile_id() -> Optional[str]:
@@ -390,7 +359,7 @@ def start_profile_with_stored_port(client):
     return None
 
 
-def stop_profile(client):
+def stop_profile(client, active_profiles: Dict[str, dict]):
     """Останавливает профиль."""
     profile_id = ask_profile_id()
     if not profile_id:
@@ -400,6 +369,10 @@ def stop_profile(client):
     result = client.stop_profile(FOLDER_ID, profile_id)
     if result:
         print("✅ Профиль остановлен")
+        # Удаляем из active_profiles если есть
+        if profile_id in active_profiles:
+            del active_profiles[profile_id]
+            print("   Удален из списка активных")
     else:
         print("❌ Не удалось остановить профиль")
 
@@ -422,8 +395,14 @@ def parse_selection(text: str, max_index: int) -> Optional[list]:
             except ValueError:
                 print(f"❌ Неверный диапазон: {part}")
                 return None
-            if start < 1 or end > max_index or start > end:
-                print(f"❌ Диапазон вне допустимых значений (1-{max_index}): {part}")
+            # Ограничиваем диапазон
+            if start < 1:
+                start = 1
+            if end > max_index:
+                end = max_index
+                print(f"⚠️  Диапазон скорректирован до {max_index}")
+            if start > end:
+                print(f"❌ Некорректный диапазон: {start}-{end}")
                 return None
             selected.extend(list(range(start - 1, end)))
         else:
@@ -432,9 +411,11 @@ def parse_selection(text: str, max_index: int) -> Optional[list]:
             except ValueError:
                 print(f"❌ Неверный номер: {part}")
                 return None
-            if idx < 1 or idx > max_index:
-                print(f"❌ Номер вне диапазона (1-{max_index}): {idx}")
-                return None
+            if idx < 1:
+                idx = 1
+            if idx > max_index:
+                print(f"⚠️  Номер {idx} скорректирован до {max_index}")
+                idx = max_index
             selected.append(idx - 1)
     return sorted(set(selected))
 
@@ -609,45 +590,25 @@ def menu_run_tebor_multiple(active_map: Dict[str, dict]):
             print("✅ tebor запущен(а)")
 
 
-def menu_stop_multiple(client):
-    """Меню остановки нескольких профилей из текущей группы."""
+def menu_stop_multiple(client, active_profiles: Dict[str, dict]):
+    """Меню остановки нескольких профилей из active_profiles."""
     while True:
         print_separator()
         print("⛔ Остановка нескольких профилей")
         print("-" * 60)
 
-        # Получаем запущенные профили через /running
-        result = client._local_request("GET", "/running")
-
-        if result is None:
-            print("❌ Не удалось получить список запущенных профилей")
-            return
-
-        # Преобразуем в список
-        if isinstance(result, list):
-            running_profiles = result
-        elif isinstance(result, dict):
-            if "profiles" in result:
-                running_profiles = result["profiles"]
-            elif "data" in result:
-                running_profiles = result["data"]
-            elif "items" in result:
-                running_profiles = result["items"]
-            else:
-                running_profiles = [result]
-        else:
-            running_profiles = []
-
-        if not running_profiles:
+        if not active_profiles:
             print("⚠️  Нет запущенных профилей")
+            print("   Используйте пункт 12 для запуска профилей")
             input("\nНажмите Enter для возврата...")
             return
 
-        print(f"📊 Найдено запущенных: {len(running_profiles)}\n")
-        for i, profile in enumerate(running_profiles, 1):
-            name = profile.get("profile_name") or profile.get("name", "N/A")
-            profile_id = profile.get("profile_id") or profile.get("id", "N/A")
-            print(f"{i}. 🟢 {name} (ID: {profile_id})")
+        profiles_list = list(active_profiles.items())
+        print(f"📊 Запущено профилей: {len(profiles_list)}\n")
+        for i, (profile_id, data) in enumerate(profiles_list, 1):
+            name = data.get("name", "N/A")
+            port = data.get("port", "N/A")
+            print(f"{i}. 🟢 {name} (порт: {port})")
 
         print()
         print("Введите номера через запятую или диапазон (1-5, 7, 9-12)")
@@ -657,25 +618,26 @@ def menu_stop_multiple(client):
         if sel == "0":
             return
 
-        indices = parse_selection(sel, len(running_profiles))
+        indices = parse_selection(sel, len(profiles_list))
         if indices is None:
             continue
 
         stopped_count = 0
         for idx in indices:
-            if idx >= len(running_profiles):
+            if idx >= len(profiles_list):
                 print(f"⚠️  Номер {idx + 1} вне диапазона")
                 continue
 
-            profile = running_profiles[idx]
-            profile_id = profile.get("profile_id") or profile.get("id")
-            name = profile.get("profile_name") or profile.get("name", "N/A")
+            profile_id, data = profiles_list[idx]
+            name = data.get("name", "N/A")
+            port = data.get("port", "N/A")
 
             print(f"\n⛔ Останавливаем {name} ({profile_id})...")
 
             result = client.stop_profile(FOLDER_ID, profile_id)
             if result is not None:
                 print("   ✅ Остановлен")
+                del active_profiles[profile_id]  # Удаляем из списка
                 stopped_count += 1
             else:
                 print("   ❌ Не удалось остановить")
@@ -688,25 +650,25 @@ def menu_stop_multiple(client):
         input("\nНажмите Enter для продолжения...")
 
 
-def stop_profile_by_id(client, profile_id: str) -> bool:
-    """
-    Останавливает профиль по его ID через API Browser.vision.
-    URL: GET /stop/{folderId}/{profileId}
-    """
-    try:
-        # Формируем URL для остановки
-        url = f"/stop/{FOLDER_ID}/{profile_id}"
-        response = client._make_request("GET", url)
+# def stop_profile_by_id(client, profile_id: str) -> bool:
+#     """
+#     Останавливает профиль по его ID через API Browser.vision.
+#     URL: GET /stop/{folderId}/{profileId}
+#     """
+#     try:
+#         # Формируем URL для остановки
+#         url = f"/stop/{FOLDER_ID}/{profile_id}"
+#         response = client._make_request("GET", url)
 
-        if response is not None:
-            print(f"   ✅ Профиль {profile_id} остановлен")
-            return True
-        else:
-            print(f"   ❌ Не удалось остановить профиль {profile_id}")
-            return False
-    except Exception as e:
-        print(f"   ❌ Ошибка при остановке профиля {profile_id}: {e}")
-        return False
+#         if response is not None:
+#             print(f"   ✅ Профиль {profile_id} остановлен")
+#             return True
+#         else:
+#             print(f"   ❌ Не удалось остановить профиль {profile_id}")
+#             return False
+#     except Exception as e:
+#         print(f"   ❌ Ошибка при остановке профиля {profile_id}: {e}")
+#         return False
 
 
 def main():
@@ -811,7 +773,7 @@ def main():
                     print("❌ Соединение не установлено")
 
             elif choice == "9":
-                show_running_profiles(client)
+                show_running_profiles(client, active_profiles)
 
             elif choice == "10":
                 result = start_profile_with_stored_port(client)
@@ -821,7 +783,7 @@ def main():
                     print("▶️  Вы можете запустить tebor отдельно: main.py → пункт 13")
 
             elif choice == "11":
-                stop_profile(client)
+                stop_profile(client, active_profiles)
 
             elif choice == "12":
                 menu_launch_multiple_profiles(client, active_profiles)
@@ -830,7 +792,7 @@ def main():
                 menu_run_tebor_multiple(active_profiles)
 
             elif choice == "14":
-                menu_stop_multiple(client)
+                menu_stop_multiple(client, active_profiles)
 
             elif choice == "0":
                 print("\n👋 До свидания!")

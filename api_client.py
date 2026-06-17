@@ -213,14 +213,14 @@ class BrowserVisionClient:
     ) -> Optional[Dict]:
         """Запускает профиль через локальный API"""
         return self._local_request(
-            "POST",
+            "GET",
             f"/start/{folder_id}/{profile_id}",
             body={"args": [f"--remote-debugging-port={port}"]} if port else {},
         )
 
     def stop_profile(self, folder_id: str, profile_id: str) -> Optional[Dict]:
         """Останавливает профиль"""
-        return self._local_request("POST", f"/stop/{folder_id}/{profile_id}")
+        return self._local_request("GET", f"/stop/{folder_id}/{profile_id}")
 
     def get_running_profiles(self) -> Optional[List[Dict]]:
         """Получает список запущенных профилей"""
