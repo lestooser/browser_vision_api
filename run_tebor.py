@@ -27,6 +27,36 @@ def set_console_title(title: str):
         pass
 
 
+def get_photo_folder(profile_id: str, custom_folder: str = None) -> str:
+    """
+    Определяет папку с фотографиями для профиля.
+
+    Приоритет:
+    1. custom_folder (если передан через --photo-folder)
+    2. Автоматический путь: D:\python\selenium-test\downloads\extracted\<profile_id>
+    3. Переменная окружения FOLDER_PHOTO_PATH (если задана)
+    """
+    if custom_folder:
+        return custom_folder
+
+    if profile_id and profile_id != "unknown":
+        # Формируем путь на основе ID профиля
+        auto_folder = f"D:\\python\\selenium-test\\downloads\\extracted\\{profile_id}"
+        if os.path.exists(auto_folder):
+            print(f"📁 Найдена папка профиля: {auto_folder}")
+            return auto_folder
+        else:
+            print(f"⚠️ Папка профиля не найдена: {auto_folder}")
+
+    # Fallback на переменную окружения
+    env_folder = os.getenv("FOLDER_PHOTO_PATH")
+    if env_folder:
+        print(f"⚠️ Используем папку из .env: {env_folder}")
+        return env_folder
+
+    return None
+
+
 if __name__ == "__main__":
     import argparse
     import traceback
@@ -41,7 +71,9 @@ if __name__ == "__main__":
         "--profile-name", help="Имя профиля для отображения", default=None
     )
     parser.add_argument(
-        "--photo-folder", help="Путь к папке с фотографиями", default=None
+        "--photo-folder",
+        help="Путь к папке с фотографиями (переопределяет авто-путь)",
+        default=None,
     )
 
     args = parser.parse_args()
@@ -60,18 +92,21 @@ if __name__ == "__main__":
     PASSWORD = args.password or os.getenv("TABOR_PASSWORD")
 
     # Определяем папку с фото
-    if args.photo_folder:
-        photo_folder = args.photo_folder
-    else:
-        photo_folder = os.getenv("FOLDER_PHOTO_PATH")
+    photo_folder = get_photo_folder(profile_id, args.photo_folder)
 
     if photo_folder:
         PHOTO_PATHS = get_photo_path(photo_folder) or []
         print(f"📁 Папка с фото: {photo_folder}")
         print(f"🖼️  Найдено фото: {len(PHOTO_PATHS)}")
+        if PHOTO_PATHS:
+            # Показываем первые 3 файла для примера
+            for i, path in enumerate(PHOTO_PATHS[:3], 1):
+                print(f"   {i}. {os.path.basename(path)}")
+            if len(PHOTO_PATHS) > 3:
+                print(f"   ... и ещё {len(PHOTO_PATHS) - 3} файлов")
     else:
         PHOTO_PATHS = []
-        print("⚠️  Папка с фото не указана. Загрузка будет пропущена.")
+        print("⚠️  Папка с фото не найдена. Загрузка будет пропущена.")
 
     if not PHOTO_PATHS:
         print("❌ Нет фотографий для загрузки. Скрипт завершится после авторизации.")
@@ -92,8 +127,7 @@ if __name__ == "__main__":
             if LOGIN and PASSWORD:
                 uploader.login(LOGIN, PASSWORD)
                 if PHOTO_PATHS:
-                    # uploader.go_to_photo_section()
-                    uploader.monitor_photos(PHOTO_PATHS)  # исправлено
+                    uploader.monitor_photos(PHOTO_PATHS)
                 else:
                     print("⚠️  Нет фото для загрузки.")
             else:
@@ -102,8 +136,7 @@ if __name__ == "__main__":
                 print("👆 Авторизуйтесь вручную, затем нажмите Enter.")
                 input("⏎ Нажмите Enter после успешного входа...")
                 if PHOTO_PATHS:
-                    # uploader.go_to_photo_section()
-                    uploader.monitor_photos(PHOTO_PATHS)  # исправлено
+                    uploader.monitor_photos(PHOTO_PATHS)
                 else:
                     print("⚠️  Нет фото для загрузки. Ожидание завершения.")
                     input("Нажмите Enter для выхода...")

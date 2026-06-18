@@ -96,6 +96,17 @@ class TaborPhotoUploader:
         link = photo_element.find_element(By.CSS_SELECTOR, "a.gallery__img-link")
         return link.get_attribute("href")
 
+    def _delete_photo_file(self, photo_path: str):
+        """Удаляет файл фото с диска, если он существует."""
+        try:
+            if os.path.isfile(photo_path):
+                os.remove(photo_path)
+                print(f"🗑️ Файл {os.path.basename(photo_path)} удалён с диска.")
+            else:
+                print(f"⚠️ Файл {os.path.basename(photo_path)} уже не существует.")
+        except Exception as e:
+            print(f"⚠️ Не удалось удалить файл {photo_path}: {e}")
+
     # ================== ЗАГРУЗКА ФОТО ==================
     def upload_photo(self, photo_path: str, max_retries: int = 3) -> bool:
         """
@@ -788,23 +799,32 @@ class TaborPhotoUploader:
             if not photos:
                 if queue:
                     photo_path = queue[0]
+
+                    # Проверяем, существует ли файл на диске
+                    if not os.path.isfile(photo_path):
+                        print(
+                            f"⚠️ Файл {os.path.basename(photo_path)} не найден, пропускаем."
+                        )
+                        queue.pop(0)
+                        continue
+
                     print(
                         f"\n📸 Галерея пуста. Загружаем: {os.path.basename(photo_path)}"
                     )
                     success = self.upload_photo(photo_path)
+
                     if success:
-                        queue.pop(
-                            0
-                        )  # Убираем из очереди ТОЛЬКО после успешной загрузки
+                        # Удаляем файл только после успешной загрузки
+                        self._delete_photo_file(photo_path)
+                        queue.pop(0)
                         photo_index += 1
                         print(
                             f"✅ Загружено {photo_index} фото. Осталось: {len(queue)}"
                         )
                     else:
                         print("❌ Загрузка не удалась. Пропускаем фото.")
-                        queue.pop(0)  # Пропускаем проблемное фото
+                        queue.pop(0)  # пропускаем проблемное фото
                         continue
-                    # После загрузки переходим к следующей итерации
                     continue
                 else:
                     print("📋 Очередь пуста, галерея пуста. Завершаем.")
@@ -837,8 +857,6 @@ class TaborPhotoUploader:
                         if self.delete_photo(photo):
                             time.sleep(1.5)
                             any_processed = True
-                            # ✅ НЕ ЗАГРУЖАЕМ НОВОЕ ФОТО СРАЗУ
-                            # Просто удаляем, на следующей итерации галерея может стать пустой
                         break
 
                 # --- Случай 2: Заблокировано ---
@@ -847,20 +865,17 @@ class TaborPhotoUploader:
                     if self.delete_photo(photo):
                         time.sleep(1.5)
                         any_processed = True
-                        # ✅ НЕ ЗАГРУЖАЕМ НОВОЕ ФОТО СРАЗУ
-                        # Пусть цикл сам загрузит, когда галерея станет пустой
                     break
 
                 # --- Случай 3: На модерации ---
                 else:
                     print("⏳ Фото на модерации, ничего не делаем.")
 
-            # ===== ШАГ 3: Если не было действий (все фото на модерации) → ждём =====
+            # ===== ШАГ 3: Если не было действий → ждём =====
             if not any_processed:
-                print("⏳ Ничего не сделано, ждём 15 секунд...")
-                time.sleep(15)
+                print("⏳ Ничего не сделано, ждём 60 секунд...")
+                time.sleep(60)
             else:
-                # Если были изменения (удаления), даём время на обновление
                 print("🔄 Были изменения, обновляем страницу...")
                 time.sleep(3)
 
