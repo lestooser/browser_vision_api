@@ -1,4 +1,5 @@
 import os
+import random
 import time
 from typing import List
 
@@ -903,38 +904,35 @@ class TaborPhotoUploader:
             # ===== ШАГ 1: Галерея пуста → загружаем новое фото =====
             if not photos:
                 if queue:
-                    # 📌 ПЕРЕПРОВЕРКА: находим первый существующий файл
-                    while queue and not os.path.isfile(queue[0]):
-                        print(
-                            f"⚠️ Файл {os.path.basename(queue[0])} не найден, пропускаем."
-                        )
-                        queue.pop(0)
+                    # 📌 ПЕРЕПРОВЕРКА: фильтруем несуществующие файлы
+                    queue = [p for p in queue if os.path.isfile(p)]
 
                     if not queue:
-                        print("📋 Все файлы были удалены или не найдены. Завершаем.")
+                        print("📋 Все файлы были удалены или не найдены. Завершаем. ")
                         break
 
-                    photo_path = queue[0]
+                    # 🎲 ВЫБИРАЕМ СЛУЧАЙНУЮ ФОТОГРАФИЮ
+                    photo_path = random.choice(queue)
                     print(
-                        f"\n📸 Галерея пуста. Загружаем: {os.path.basename(photo_path)}"
+                        f"\n📸 Галерея пуста. Загружаем случайное фото: {os.path.basename(photo_path)} "
                     )
                     success = self.upload_photo(photo_path)
 
                     if success:
                         # Удаляем файл только после успешной загрузки
                         self._delete_photo_file(photo_path)
-                        queue.pop(0)
+                        queue.remove(photo_path)  # Удаляем именно это фото из очереди
                         photo_index += 1
                         print(
-                            f"✅ Загружено {photo_index} фото. Осталось: {len(queue)}"
+                            f"✅ Загружено {photo_index} фото. Осталось: {len(queue)} "
                         )
                     else:
-                        print("❌ Загрузка не удалась. Пропускаем фото.")
-                        queue.pop(0)
+                        print("❌ Загрузка не удалась. Пропускаем фото. ")
+                        queue.remove(photo_path)  # Удаляем из очереди даже при ошибке
                         continue
                     continue
                 else:
-                    print("📋 Очередь пуста, галерея пуста. Завершаем.")
+                    print("📋 Очередь пуста, галерея пуста. Завершаем. ")
                     break
 
             # ===== ШАГ 2: Галерея не пуста → проверяем статусы =====
