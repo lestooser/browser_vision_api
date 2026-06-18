@@ -113,11 +113,20 @@ class TaborPhotoUploader:
         Загрузка фотографии. Сначала пробует основной способ (через send_keys),
         если не получается – альтернативный (через клик по кнопке «Выбрать файл»).
         """
+        # 📌 ПРОВЕРКА: файл существует?
         if not os.path.isfile(photo_path):
-            raise FileNotFoundError(f"Файл не найден: {photo_path}")
+            print(f"⚠️ Файл не найден: {photo_path}")
+            return False
 
         # Сначала пробуем основной способ
         for attempt in range(max_retries):
+            # 📌 ПЕРЕПРОВЕРКА: перед каждой попыткой проверяем, существует ли файл
+            if not os.path.isfile(photo_path):
+                print(
+                    f"⚠️ Файл {os.path.basename(photo_path)} был удалён другим процессом. Пропускаем."
+                )
+                return False
+
             try:
                 print(
                     f"\n🔄 Попытка загрузки (основной способ) {attempt + 1}/{max_retries}"
@@ -128,24 +137,6 @@ class TaborPhotoUploader:
                     print("✅ Фото успешно загружено!")
                     self._close_upload_modal()
                     return True
-
-                # Если кнопка «Сохранить» не появилась – пробуем альтернативный способ
-                if result.get("type") == "no_save_button":
-                    print(
-                        "⚠️ Кнопка 'Сохранить' не появилась. Пробуем альтернативный способ..."
-                    )
-                    # Пытаемся загрузить тем же фото, но через клик по кнопке
-                    # alt_result = self._do_upload_alt(photo_path)
-                    # if alt_result["success"]:
-                    #     print("✅ Фото успешно загружено (альтернативный способ)!")
-                    #     self._close_upload_modal()
-                    #     return True
-                    # else:
-                    #     print(
-                    #         f"❌ Альтернативный способ не сработал: {alt_result.get('error')}"
-                    #     )
-                    #     # Если альтернатива не помогла, продолжаем основной цикл
-                    #     continue
 
                 error_type = result.get("type", "unknown")
                 if error_type == "rate_limit":
@@ -160,7 +151,7 @@ class TaborPhotoUploader:
                     return False
                 else:
                     print(f"❌ Ошибка: {result.get('error')}. Повтор через 5 сек...")
-                    time.sleep(5)
+                    time.sleep(10)
                     continue
 
             except Exception as e:
@@ -203,12 +194,15 @@ class TaborPhotoUploader:
                 time.sleep(2)
 
                 self.wait.until(
-                    EC.presence_of_element_located(
-                        (By.CSS_SELECTOR, ".arcticmodal-container")
+                    lambda d: (
+                        d.find_elements(By.CSS_SELECTOR, ".arcticmodal-container")
+                        or d.find_elements(
+                            By.CSS_SELECTOR, "button.photos_next_step_action"
+                        )
                     )
                 )
                 print("Модальное окно открыто")
-
+                time.sleep(1)
                 # Ждем появления input
                 self.wait.until(
                     EC.presence_of_element_located(
@@ -782,6 +776,14 @@ class TaborPhotoUploader:
     # ================== ОСНОВНОЙ МОНИТОРИНГ ==================
     def monitor_photos(self, photo_paths: List[str]):
         queue = list(photo_paths)
+
+        # 📌 ОЧИСТКА: удаляем из очереди все несуществующие файлы
+        initial_count = len(queue)
+        queue = [p for p in queue if os.path.isfile(p)]
+        removed_count = initial_count - len(queue)
+        if removed_count > 0:
+            print(f"⚠️ Удалено из очереди {removed_count} несуществующих файлов")
+
         photo_index = 0
         self.go_to_photo_section()
         max_iterations = 60
@@ -798,16 +800,18 @@ class TaborPhotoUploader:
             # ===== ШАГ 1: Галерея пуста → загружаем новое фото =====
             if not photos:
                 if queue:
-                    photo_path = queue[0]
-
-                    # Проверяем, существует ли файл на диске
-                    if not os.path.isfile(photo_path):
+                    # 📌 ПЕРЕПРОВЕРКА: находим первый существующий файл
+                    while queue and not os.path.isfile(queue[0]):
                         print(
-                            f"⚠️ Файл {os.path.basename(photo_path)} не найден, пропускаем."
+                            f"⚠️ Файл {os.path.basename(queue[0])} не найден, пропускаем."
                         )
                         queue.pop(0)
-                        continue
 
+                    if not queue:
+                        print("📋 Все файлы были удалены или не найдены. Завершаем.")
+                        break
+
+                    photo_path = queue[0]
                     print(
                         f"\n📸 Галерея пуста. Загружаем: {os.path.basename(photo_path)}"
                     )
@@ -823,7 +827,7 @@ class TaborPhotoUploader:
                         )
                     else:
                         print("❌ Загрузка не удалась. Пропускаем фото.")
-                        queue.pop(0)  # пропускаем проблемное фото
+                        queue.pop(0)
                         continue
                     continue
                 else:
