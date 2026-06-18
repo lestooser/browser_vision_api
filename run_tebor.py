@@ -28,12 +28,12 @@ def set_console_title(title: str):
 
 
 def get_photo_folder(profile_id: str, custom_folder: str = None) -> str:
-    """
+    r"""
     Определяет папку с фотографиями для профиля.
 
     Приоритет:
     1. custom_folder (если передан через --photo-folder)
-    2. Автоматический путь: D:\python\selenium-test\downloads\extracted\<profile_id>
+    2. Автоматический путь: D:\\python\\selenium-test\\downloads\\extracted\\<profile_id>
     3. Переменная окружения FOLDER_PHOTO_PATH (если задана)
     """
     if custom_folder:
@@ -106,10 +106,9 @@ if __name__ == "__main__":
                 print(f"   ... и ещё {len(PHOTO_PATHS) - 3} файлов")
     else:
         PHOTO_PATHS = []
-        print("⚠️  Папка с фото не найдена. Загрузка будет пропущена.")
+        print("⚠️  Папка с фото не найдена. Будет предложено пополнение.")
 
-    if not PHOTO_PATHS:
-        print("❌ Нет фотографий для загрузки. Скрипт завершится после авторизации.")
+    # ❌ УДАЛЕНО: if not PHOTO_PATHS: print("❌ Нет фотографий...")
 
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{args.port}")
@@ -121,25 +120,20 @@ if __name__ == "__main__":
             f"✅ Selenium подключился к профилю {args.profile_id or 'unknown'} на порту {args.port}"
         )
 
-        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD)
+        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=profile_id)
 
         if args.auto:
             if LOGIN and PASSWORD:
                 uploader.login(LOGIN, PASSWORD)
-                if PHOTO_PATHS:
-                    uploader.monitor_photos(PHOTO_PATHS)
-                else:
-                    print("⚠️  Нет фото для загрузки.")
+                # ✅ ВСЕГДА вызываем monitor_photos, даже если PHOTO_PATHS пуст
+                uploader.monitor_photos(PHOTO_PATHS)
             else:
                 print("\n🔐 Отсутствуют логин/пароль. Перехожу в ручной режим.")
                 driver.get("https://tabor.ru")
                 print("👆 Авторизуйтесь вручную, затем нажмите Enter.")
                 input("⏎ Нажмите Enter после успешного входа...")
-                if PHOTO_PATHS:
-                    uploader.monitor_photos(PHOTO_PATHS)
-                else:
-                    print("⚠️  Нет фото для загрузки. Ожидание завершения.")
-                    input("Нажмите Enter для выхода...")
+                # ✅ ВСЕГДА вызываем monitor_photos
+                uploader.monitor_photos(PHOTO_PATHS)
         else:
             driver.get("https://tabor.ru")
             print("✅ Браузер открыт на tabor.ru")

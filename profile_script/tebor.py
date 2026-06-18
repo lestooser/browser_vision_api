@@ -25,11 +25,12 @@ class TaborPhotoUploader:
     STATUS_BLOCKED = "Заблокировано"
     STATUS_PENDING = ""  # на модерации (нет метки)
 
-    def __init__(self, driver, login: str, password: str):
+    def __init__(self, driver, login: str, password: str, id_value: str = None):
         self.driver = driver
         self.wait = WebDriverWait(driver, 20)
         self._login = login
         self._password = password
+        self.id_value = id_value
 
     # ================== АВТОРИЗАЦИЯ ==================
     def login(self) -> bool:
@@ -69,6 +70,56 @@ class TaborPhotoUploader:
         # Ждём, пока загрузится хотя бы контейнер галереи
         self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.gallery")))
         time.sleep(2)
+
+    def _trigger_main_processing(self):
+        """Вызывает логику из main.py для обработки фотографий."""
+        if not self.id_value:
+            print("❌ Ошибка: Не указан ID для запроса к main.py")
+            return False
+
+        print(f"\n🔄 Отправка запроса в main для ID: {self.id_value} (итераций: 5)...")
+
+        try:
+            import sys
+
+            # 🆕 Используем insert(0, ...) для приоритета и r"" для raw string
+            sys.path.insert(0, r"D:\python\selenium-test")
+
+            print("🔧 Проверка: можем ли импортировать main?")
+            from main import start_uniq
+
+            print("✅ Импорт main успешен")
+
+            # Запускаем обработку
+            result = start_uniq(
+                id_path=self.id_value,
+                iter_count=5,
+                progress_callback=lambda i, t: print(
+                    f"📊 Прогресс main: {i}/{t} ({int(i / t * 100)}%)"
+                ),
+            )
+
+            print(f"🔍 Результат вызова start_uniq: {repr(result)}")
+
+            if result is True:
+                print(
+                    "✅ Запрос к main успешно выполнен. Папка download/extracted/ обновлена."
+                )
+                return True
+            else:
+                print(f"❌ start_uniq вернул {result}, а не True")
+                return False
+
+        except ImportError as e:
+            print(f"❌ Ошибка импорта: {e}")
+            print("💡 Убедитесь, что main.py находится в D:\\python\\selenium-test\\")
+            return False
+        except Exception as e:
+            print(f"❌ Ошибка при выполнении main.py: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return False
 
     # ================== РАБОТА С ГАЛЕРЕЕЙ ==================
     def _get_gallery_photos(self) -> list:
@@ -887,8 +938,27 @@ class TaborPhotoUploader:
         removed_count = initial_count - len(queue)
         if removed_count > 0:
             print(f"⚠️ Удалено из очереди {removed_count} несуществующих файлов")
-
-        photo_index = 0
+        if not queue:
+            if self.id_value:
+                response = (
+                    input(
+                        "📸 Фотографии кончились, отправить запрос на пополнение? (да/нет): "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if response in ("да", "yes", "y", "д"):
+                    if self._trigger_main_processing():
+                        print("🔄 Запрос успешен и фото добавились.")
+                    else:
+                        print("Не удалось выполнить операцию по добавлению")
+                        return
+                else:
+                    print("📋 Запрос отменен пользователем. Завершаем.")
+            else:
+                print("📋 Очередь пуста. Завершаем.")
+            return  # 🆕 Прерываем выполнение, чтобы не было ошибки с переменной photos
+            photo_index = 0
         self.go_to_photo_section()
         max_iterations = 60
         iteration = 0
@@ -904,43 +974,58 @@ class TaborPhotoUploader:
             # ===== ШАГ 1: Галерея пуста → загружаем новое фото =====
             if not photos:
                 if queue:
-                    # 📌 ПЕРЕПРОВЕРКА: фильтруем несуществующие файлы
+                    # ... (логика загрузки случайного фото без изменений) ...
                     queue = [p for p in queue if os.path.isfile(p)]
-
                     if not queue:
-                        print("📋 Все файлы были удалены или не найдены. Завершаем. ")
+                        print("📋 Все файлы были удалены или не найдены.")
                         break
 
-                    # 🎲 ВЫБИРАЕМ СЛУЧАЙНУЮ ФОТОГРАФИЮ
                     photo_path = random.choice(queue)
                     print(
-                        f"\n📸 Галерея пуста. Загружаем случайное фото: {os.path.basename(photo_path)} "
+                        f"\n📸 Галерея пуста. Загружаем случайное фото: {os.path.basename(photo_path)}"
                     )
                     success = self.upload_photo(photo_path)
 
                     if success:
-                        # Удаляем файл только после успешной загрузки
                         self._delete_photo_file(photo_path)
-                        queue.remove(photo_path)  # Удаляем именно это фото из очереди
+                        queue.remove(photo_path)
                         photo_index += 1
                         print(
-                            f"✅ Загружено {photo_index} фото. Осталось: {len(queue)} "
+                            f"✅ Загружено {photo_index} фото. Осталось: {len(queue)}"
                         )
                     else:
-                        print("❌ Загрузка не удалась. Пропускаем фото. ")
-                        queue.remove(photo_path)  # Удаляем из очереди даже при ошибке
-                        continue
+                        print("❌ Загрузка не удалась. Пропускаем фото.")
+                        queue.remove(photo_path)
                     continue
                 else:
-                    print("📋 Очередь пуста, галерея пуста. Завершаем. ")
-                    break
+                    # 🆕 Очередь пуста, спрашиваем про пополнение
+                    if self.id_value:
+                        response = (
+                            input(
+                                "📸 Фотографии кончились, отправить запрос на пополнение? (да/нет): "
+                            )
+                            .strip()
+                            .lower()
+                        )
+                        if response in ("да", "yes", "y", "д"):
+                            self._trigger_main_processing()
+                            print("🔄 Запрос выполнен. Завершаем текущий цикл.")
+                            break
+                        else:
+                            print("📋 Запрос отменен пользователем. Завершаем.")
+                            break
+                    else:
+                        print("📋 Очередь пуста, галерея пуста. Завершаем.")
+                        break
 
             # ===== ШАГ 2: Галерея не пуста → проверяем статусы =====
+            # ... (остальной код цикла без изменений) ...
             print(f"📸 Найдено фото: {len(photos)}")
             time.sleep(1.5)
             any_processed = False
 
             for i, photo in enumerate(photos):
+                # ... (логика проверки статусов и удаления) ...
                 try:
                     status = self._get_photo_status(photo)
                 except Exception as e:
@@ -949,7 +1034,6 @@ class TaborPhotoUploader:
 
                 print(f"Фото {i + 1}: статус '{status}'")
 
-                # --- Случай 1: Главная ---
                 if status == self.STATUS_MAIN:
                     decision = (
                         input("✅ Это правильная главная? (да/нет): ").strip().lower()
@@ -963,20 +1047,15 @@ class TaborPhotoUploader:
                             time.sleep(1.5)
                             any_processed = True
                         break
-
-                # --- Случай 2: Заблокировано ---
                 elif status == self.STATUS_BLOCKED:
                     print("⚠️ Заблокированное фото. Удаляем.")
                     if self.delete_photo(photo):
                         time.sleep(1.5)
                         any_processed = True
                     break
-
-                # --- Случай 3: На модерации ---
                 else:
                     print("⏳ Фото на модерации, ничего не делаем.")
 
-            # ===== ШАГ 3: Если не было действий → ждём =====
             if not any_processed:
                 print("⏳ Ничего не сделано, ждём 60 секунд...")
                 time.sleep(60)
@@ -986,7 +1065,19 @@ class TaborPhotoUploader:
 
         # Завершение
         if not queue:
-            print("📋 Все фото обработаны, главная не выбрана.")
+            # 🆕 Дополнительная проверка на случай, если цикл завершился из-за пустой очереди
+            if self.id_value and not photos:
+                response = (
+                    input(
+                        "📸 Фотографии кончились, отправить запрос на пополнение? (да/нет): "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if response in ("да", "yes", "y", "д"):
+                    self._trigger_main_processing()
+            else:
+                print("📋 Все фото обработаны, главная не выбрана.")
         else:
             print("⏰ Таймаут мониторинга.")
 
@@ -994,7 +1085,7 @@ class TaborPhotoUploader:
 # ================== ЗАПУСК ==================
 
 
-def start_connect(LOGIN, PASSWORD, PORT_NUMBER):
+def start_connect(LOGIN, PASSWORD, PORT_NUMBER, ID_VALUE=None):
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{PORT_NUMBER}")
     service = Service(r"C:\chromedriver_148\chromedriver-win64\chromedriver.exe")
@@ -1003,7 +1094,7 @@ def start_connect(LOGIN, PASSWORD, PORT_NUMBER):
     print("✅ Selenium подключился, текущий URL:", driver.current_url)
 
     try:
-        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD)
+        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=ID_VALUE)
         input("Подтвердите авторизацию (если нужно) и нажмите Enter...")
         time.sleep(2)
         uploader.monitor_photos(PHOTO_PATHS)
@@ -1025,5 +1116,13 @@ if __name__ == "__main__":
     parser.add_argument("--login", default=os.getenv("TABOR_LOGIN"))
     parser.add_argument("--password", default=os.getenv("TABOR_PASSWORD"))
     args = parser.parse_args()
+    parser.add_argument(
+        "--id",
+        type=str,
+        default=os.getenv("TABOR_ID"),
+        help="ID для папки download/extracted/<id>",
+    )
 
-    start_connect(args.login, args.password, args.port)
+    args = parser.parse_args()
+
+    start_connect(args.login, args.password, args.port, args.id)
