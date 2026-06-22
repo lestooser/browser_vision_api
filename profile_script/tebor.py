@@ -20,10 +20,9 @@ PHOTO_PATHS = get_photo_path(os.getenv("FOLDER_PHOTO_PATH"))
 
 
 class TaborPhotoUploader:
-    # Статусы фото (из наблюдений)
     STATUS_MAIN = "Главная"
     STATUS_BLOCKED = "Заблокировано"
-    STATUS_PENDING = ""  # на модерации (нет метки)
+    STATUS_PENDING = ""
 
     def __init__(self, driver, login: str, password: str, id_value: str = None):
         self.driver = driver
@@ -31,24 +30,295 @@ class TaborPhotoUploader:
         self._login = login
         self._password = password
         self.id_value = id_value
+        self._turbolinks_disabled = False
+        self._gallery_url = None  # 🆕 Сохраняем точный URL галереи
+
+    # ================== СЛУЧАЙНЫЕ ЗАДЕРЖКИ ==================
+    def _random_delay(
+        self, min_sec: float = 1.0, max_sec: float = 5.0, context: str = ""
+    ):
+        """Случайная задержка с уведомлением."""
+        delay = random.uniform(min_sec, max_sec)
+        msg = f"⏱️  Случайная задержка {delay:.1f} сек."
+        if context:
+            msg += f" [{context}]"
+        print(msg)
+        time.sleep(delay)
+
+    # ================== ЗАЩИТА ОТ БАНА: ИМИТАЦИЯ ЧЕЛОВЕКА ==================
+    def _simulate_human_activity(self):
+        """Имитирует человеческую активность между загрузками."""
+        print("\n👤 Имитация человеческой активности...")
+
+        actions = [
+            (
+                "скролл страницы",
+                lambda: self.driver.execute_script(
+                    "window.scrollBy(0, {});".format(random.randint(100, 400))
+                ),
+            ),
+            (
+                "скролл вверх",
+                lambda: self.driver.execute_script(
+                    "window.scrollBy(0, {});".format(random.randint(-300, -100))
+                ),
+            ),
+            (
+                "движение мыши",
+                lambda: self.driver.execute_script("""
+                let x = Math.random() * window.innerWidth;
+                let y = Math.random() * window.innerHeight;
+                let event = new MouseEvent('mousemove', {
+                    clientX: x, clientY: y, bubbles: true
+                });
+                document.body.dispatchEvent(event);
+            """),
+            ),
+            ("пауза на раздумье", lambda: time.sleep(random.uniform(2, 5))),
+        ]
+
+        num_actions = random.randint(2, 4)
+        for i in range(num_actions):
+            action_name, action_func = random.choice(actions)
+            print(f"  🎭 {action_name}...")
+            try:
+                action_func()
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.5, 1.5))
+
+        print("✅ Имитация завершена\n")
+
+    # ================== ЗАЩИТА ОТ БАНА: ДЛИТЕЛЬНАЯ ПАУЗА ==================
+    def _anti_ban_delay(self):
+        """Длительная случайная пауза между загрузками фото."""
+        base_delay = random.uniform(45, 120)
+
+        if random.random() < 0.1:
+            base_delay += random.uniform(60, 180)
+            print("🤔 Долгое раздумье пользователя...")
+
+        print(f"\n⏸️  Пауза между загрузками: {base_delay:.0f} секунд (защита от бана)")
+        print("   (человек выбирает следующее фото, пьёт кофе, думает)")
+
+        elapsed = 0
+        while elapsed < base_delay:
+            chunk = min(random.uniform(5, 15), base_delay - elapsed)
+            time.sleep(chunk)
+            elapsed += chunk
+
+            if int(elapsed) % 20 < 5:
+                self._simulate_human_activity()
+
+        print("✅ Пауза завершена, можно загружать следующее фото\n")
+
+    # ================== ОТКЛЮЧЕНИЕ TURBOLINKS ==================
+    def _disable_turbolinks(self):
+        """Отключает Turbolinks для корректной навигации и очистки."""
+        if self._turbolinks_disabled:
+            return
+
+        try:
+            self.driver.execute_script("""
+                if (window.Turbolinks) {
+                    Turbolinks.supported = false;
+                }
+                if (window.jQuery && jQuery.turbolinks) {
+                    jQuery.turbolinks.disabled = true;
+                }
+                if (window.jQuery) {
+                    $(document).off('page:change').off('turbolinks:load');
+                }
+            """)
+            self._turbolinks_disabled = True
+            print("🔧 Turbolinks отключён")
+        except Exception as e:
+            print(f"⚠️  Не удалось отключить Turbolinks: {e}")
+
+    # ================== CSRF TOKEN ==================
+    def _get_csrf_token(self) -> str:
+        """Получает CSRF token из meta-тега."""
+        try:
+            token = self.driver.execute_script(
+                "return document.querySelector('meta[name=\"csrf-token\"]')?.content || '';"
+            )
+            return token or ""
+        except Exception:
+            return ""
+
+    # ================== ОЖИДАНИЕ ЗАГРУЗЧИКА ==================
+    def _wait_for_uploader_script(self):
+        """Ждёт, пока скрипт загрузчика photo_uploader полностью загрузится."""
+        try:
+            WebDriverWait(self.driver, 10).until(
+                lambda d: d.execute_script("""
+                    return document.querySelector('#fileupload_master') !== null ||
+                           document.querySelector('.arcticmodal-container') !== null ||
+                           document.querySelector('#crop_action') !== null;
+                """)
+            )
+            print("✅ Скрипт загрузчика загружен")
+        except TimeoutException:
+            print("⚠️  Скрипт загрузчика не загрузился за 10 сек")
+
+    # ================== 🆕 ПРОВЕРКА И ВОЗВРАТ В ГАЛЕРЕЮ ==================
+    def _ensure_on_gallery(self) -> bool:
+        """
+        Проверяет, что мы на точном URL галереи.
+        Если нет — возвращает на сохранённый URL.
+        Возвращает True если успех.
+        """
+        if not self._gallery_url:
+            print("⚠️  URL галереи не сохранён, переходим в галерею...")
+            self.go_to_photo_section()
+            return True
+
+        current_url = self.driver.current_url
+        print(f"🔍 Проверка URL: {current_url}")
+        print(f"📍 Ожидаемый URL: {self._gallery_url}")
+
+        # Проверяем точное совпадение URL (без query параметров)
+        current_base = current_url.split("?")[0].split("#")[0]
+        gallery_base = self._gallery_url.split("?")[0].split("#")[0]
+
+        if current_base != gallery_base:
+            print("⚠️  Не на странице галереи! Возвращаемся...")
+            try:
+                self.driver.get(self._gallery_url)
+                time.sleep(2)
+                self.wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "ul.gallery"))
+                )
+                print("✅ Вернулись в галерею")
+                return True
+            except Exception as e:
+                print(f"❌ Не удалось вернуться в галерею: {e}")
+                return False
+
+        print("✅ Мы на странице галереи")
+        return True
+
+    # ================== ОЧИСТКА СОСТОЯНИЯ ЗАГРУЗОК ==================
+    def _clear_upload_state(self):
+        """Очистка cookies/storage с учётом Turbolinks."""
+        print("\n🧹 === Очистка состояния загрузок ===")
+
+        self._disable_turbolinks()
+
+        all_cookies = self.driver.get_cookies()
+        upload_patterns = [
+            "photo",
+            "upload",
+            "gallery",
+            "crop",
+            "image",
+            "file",
+            "uploader",
+            "media",
+            "attachment",
+            "temp",
+        ]
+        auth_patterns = [
+            "session",
+            "auth",
+            "token",
+            "remember",
+            "user_id",
+            "csrf",
+            "sid",
+            "ssid",
+            "secret",
+            "jwt",
+            "login",
+        ]
+
+        deleted_cookies = []
+        kept_cookies = []
+
+        for cookie in all_cookies:
+            name_lower = cookie["name"].lower()
+            is_upload = any(p in name_lower for p in upload_patterns)
+            is_auth = any(p in name_lower for p in auth_patterns)
+
+            if is_upload and not is_auth:
+                try:
+                    self.driver.delete_cookie(cookie["name"])
+                    deleted_cookies.append(cookie["name"])
+                except Exception as e:
+                    print(f"  ⚠️  Не удалось удалить cookie '{cookie['name']}': {e}")
+            else:
+                kept_cookies.append(cookie["name"])
+
+        if deleted_cookies:
+            print(
+                f"  🗑️  Удалено cookies ({len(deleted_cookies)}): {', '.join(deleted_cookies)}"
+            )
+        else:
+            print("  ℹ️  Cookies загрузок не обнаружены")
+        print(f"  🔒 Сохранено авторизационных cookies: {len(kept_cookies)}")
+
+        try:
+            cleared_ls = self.driver.execute_script("""
+                let cleared = [];
+                let keysToRemove = [];
+                for (let i = localStorage.length - 1; i >= 0; i--) {
+                    let key = localStorage.key(i);
+                    if (key && (key.includes('photo') || key.includes('upload') || key.includes('gallery') || key.includes('crop') || key.includes('image') || key.includes('file') || key.includes('uploader') || key.includes('media'))) {
+                        keysToRemove.push({storage: 'localStorage', key: key});
+                    }
+                }
+                for (let i = sessionStorage.length - 1; i >= 0; i--) {
+                    let key = sessionStorage.key(i);
+                    if (key && (key.includes('photo') || key.includes('upload') || key.includes('gallery') || key.includes('crop') || key.includes('image') || key.includes('file') || key.includes('uploader') || key.includes('media'))) {
+                        keysToRemove.push({storage: 'sessionStorage', key: key});
+                    }
+                }
+                keysToRemove.forEach(item => {
+                    if (item.storage === 'localStorage') localStorage.removeItem(item.key);
+                    else sessionStorage.removeItem(item.key);
+                    cleared.push(item.storage + ':' + item.key);
+                });
+                return cleared;
+            """)
+            if cleared_ls:
+                print(
+                    f"  🗑️  Очищено из storage ({len(cleared_ls)}): {', '.join(cleared_ls)}"
+                )
+            else:
+                print("  ℹ️  Storage загрузок пуст")
+        except Exception as e:
+            print(f"  ⚠️  Ошибка очистки storage: {e}")
+
+        print("  🔄 Полная перезагрузка страницы (hard reload)...")
+        try:
+            self.driver.execute_script("window.location.reload(true);")
+            time.sleep(3)
+        except Exception:
+            self.driver.refresh()
+            time.sleep(2)
+
+        print("🧹 === Очистка завершена ===\n")
 
     # ================== АВТОРИЗАЦИЯ ==================
     def login(self) -> bool:
-        """Авторизация с ручным обходом Turnstile."""
         self.driver.get("https://tabor.ru")
+        self._random_delay(2, 4, "открытие сайта")
 
         login_btn = self.wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "a[href='/signin']"))
         )
         login_btn.click()
+        self._random_delay(1, 3, "переход на страницу входа")
 
         email_input = self.wait.until(
             EC.presence_of_element_located((By.ID, "session_user_login"))
         )
         email_input.send_keys(self._login)
+        self._random_delay(0.5, 1.5, "ввод логина")
 
         pass_input = self.driver.find_element(By.ID, "session_user_password")
         pass_input.send_keys(self._password)
+        self._random_delay(0.5, 1.5, "ввод пароля")
 
         input("👉 Пройдите капчу 'Я не робот' и нажмите Enter...")
 
@@ -56,23 +326,29 @@ class TaborPhotoUploader:
             By.CSS_SELECTOR, "input[type='submit'][value='Войти']"
         )
         submit_btn.click()
+        self._random_delay(2, 5, "после нажатия 'Войти'")
         return True
 
     def go_to_photo_section(self):
-        """
-        Переход в раздел 'Фото' (галерею).
-        Используем актуальный селектор из HTML.
-        """
+        """Переход в раздел 'Фото' и сохранение URL галереи."""
+        self._disable_turbolinks()
+
         photo_link = self.wait.until(
             EC.element_to_be_clickable((By.CSS_SELECTOR, "a.user__gallery__link_photo"))
         )
         photo_link.click()
-        # Ждём, пока загрузится хотя бы контейнер галереи
         self.wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ul.gallery")))
-        time.sleep(2)
+        self._random_delay(1.5, 3, "загрузка галереи")
+
+        # 🆕 СОХРАНЯЕМ ТОЧНЫЙ URL ГАЛЕРЕИ
+        self._gallery_url = self.driver.current_url
+        print(f"📍 URL галереи сохранён: {self._gallery_url}")
+
+        csrf = self._get_csrf_token()
+        if csrf:
+            print(f"🔑 CSRF token получен: {csrf[:12]}...")
 
     def _trigger_main_processing(self):
-        """Вызывает логику из main.py для обработки фотографий."""
         if not self.id_value:
             print("❌ Ошибка: Не указан ID для запроса к main.py")
             return False
@@ -82,15 +358,9 @@ class TaborPhotoUploader:
         try:
             import sys
 
-            # 🆕 Используем insert(0, ...) для приоритета и r"" для raw string
             sys.path.insert(0, r"D:\python\selenium-test")
-
-            print("🔧 Проверка: можем ли импортировать main?")
             from main import start_uniq
 
-            print("✅ Импорт main успешен")
-
-            # Запускаем обработку
             result = start_uniq(
                 id_path=self.id_value,
                 iter_count=5,
@@ -99,42 +369,21 @@ class TaborPhotoUploader:
                 ),
             )
 
-            print(f"🔍 Результат вызова start_uniq: {repr(result)}")
-
             if result is True:
-                print(
-                    "✅ Запрос к main успешно выполнен. Папка download/extracted/ обновлена."
-                )
+                print("✅ Запрос к main успешно выполнен.")
                 return True
             else:
                 print(f"❌ start_uniq вернул {result}, а не True")
                 return False
-
-        except ImportError as e:
-            print(f"❌ Ошибка импорта: {e}")
-            print("💡 Убедитесь, что main.py находится в D:\\python\\selenium-test\\")
-            return False
         except Exception as e:
             print(f"❌ Ошибка при выполнении main.py: {e}")
-            import traceback
-
-            traceback.print_exc()
             return False
 
     # ================== РАБОТА С ГАЛЕРЕЕЙ ==================
     def _get_gallery_photos(self) -> list:
-        """Возвращает список всех элементов фото (li.gallery__item)."""
         return self.driver.find_elements(By.CSS_SELECTOR, "li.gallery__item")
 
-    def _is_gallery_empty(self) -> bool:
-        """Проверяет, пуста ли галерея."""
-        return len(self._get_gallery_photos()) == 0
-
     def _get_photo_status(self, photo_element) -> str:
-        """
-        Возвращает текст статуса фото.
-        Если статус отсутствует – возвращает пустую строку (означает "на модерации").
-        """
         try:
             status_elem = photo_element.find_element(
                 By.CSS_SELECTOR, "span.meta__item__lbl"
@@ -144,100 +393,79 @@ class TaborPhotoUploader:
             return ""
 
     def _get_photo_link(self, photo_element) -> str:
-        """Возвращает URL страницы фото (из a.gallery__img-link)."""
         link = photo_element.find_element(By.CSS_SELECTOR, "a.gallery__img-link")
         return link.get_attribute("href")
 
     def _delete_photo_file(self, photo_path: str):
-        """Удаляет файл фото с диска, если он существует."""
         try:
             if os.path.isfile(photo_path):
                 os.remove(photo_path)
-                print(f"🗑️ Файл {os.path.basename(photo_path)} удалён с диска.")
-            else:
-                print(f"⚠️ Файл {os.path.basename(photo_path)} уже не существует.")
+                print(f"🗑️  Файл {os.path.basename(photo_path)} удалён с диска.")
         except Exception as e:
-            print(f"⚠️ Не удалось удалить файл {photo_path}: {e}")
+            print(f"⚠️  Не удалось удалить файл {photo_path}: {e}")
 
     # ================== ЗАГРУЗКА ФОТО ==================
     def upload_photo(self, photo_path: str, max_retries: int = 3) -> bool:
-        """
-        Загрузка фотографии. Сначала пробует основной способ (через send_keys),
-        если не получается – альтернативный (через клик по кнопке «Выбрать файл»).
-        """
-        # 📌 ПРОВЕРКА: файл существует?
         if not os.path.isfile(photo_path):
-            print(f"⚠️ Файл не найден: {photo_path}")
+            print(f"⚠️  Файл не найден: {photo_path}")
             return False
 
-        # Сначала пробуем основной способ
         for attempt in range(max_retries):
-            # 📌 ПЕРЕПРОВЕРКА: перед каждой попыткой проверяем, существует ли файл
             if not os.path.isfile(photo_path):
-                print(
-                    f"⚠️ Файл {os.path.basename(photo_path)} был удалён другим процессом. Пропускаем."
-                )
                 return False
 
             try:
-                print(
-                    f"\n🔄 Попытка загрузки (основной способ) {attempt + 1}/{max_retries}"
-                )
+                print(f"\n🔄 Попытка загрузки {attempt + 1}/{max_retries}")
+                self._random_delay(3, 7, "подготовка перед загрузкой")
+
                 result = self._do_upload(photo_path)
 
                 if result["success"]:
                     print("✅ Фото успешно загружено!")
+                    self._random_delay(2, 4, "после успешной загрузки")
                     self._close_upload_modal()
                     return True
 
                 error_type = result.get("type", "unknown")
                 if error_type == "rate_limit":
                     print("⏳ Лимит загрузок. Ждём 10 минут...")
-                    time.sleep(620)
+                    self._random_delay(610, 630, "лимит загрузок")
                     continue
                 elif error_type == "duplicate":
-                    print("⚠️ Фото уже существует. Пропускаем.")
+                    print("⚠️  Фото уже существует. Пропускаем.")
                     return False
                 elif error_type == "quality":
-                    print("⚠️ Фото не прошло проверку качества. Пропускаем.")
+                    print("⚠️  Фото не прошло проверку качества. Пропускаем.")
                     return False
                 else:
-                    print(f"❌ Ошибка: {result.get('error')}. Повтор через 5 сек...")
-                    time.sleep(10)
+                    print(f"❌ Ошибка: {result.get('error')}. Повтор...")
+                    self._random_delay(10, 15, "перед повтором")
                     continue
 
             except Exception as e:
-                print(f"⚠️ Ошибка загрузки: {e}")
+                print(f"⚠️  Ошибка загрузки: {e}")
                 try:
                     self._close_upload_modal()
                 except Exception:
                     pass
                 if attempt < max_retries - 1:
-                    time.sleep(10)
+                    self._random_delay(10, 20, "перед повтором после ошибки")
                     continue
                 raise
 
         return False
 
     def _do_upload(self, photo_path: str) -> dict:
-        """
-        Основной способ загрузки фото.
-        Возвращает dict: {"success": bool, "error": str, "type": str}
-        type может быть: "success", "rate_limit", "duplicate", "quality", "no_save_button", "unknown"
-        """
-        # ================== ШАГ 1: ОТКРЫТИЕ МОДАЛЬНОГО ОКНА ==================
+        # ШАГ 1: ОТКРЫТИЕ МОДАЛЬНОГО ОКНА
         for attempt in range(3):
             try:
-                # Проверяем, что мы в галерее
-                if (
-                    "photos" not in self.driver.current_url
-                    and "gallery" not in self.driver.current_url
-                ):
-                    print("🔄 Не в галерее, переходим...")
+                # 🆕 ПЕРЕД КАЖДОЙ ПОПЫТКОЙ — проверяем, что мы в галерее
+                if not self._ensure_on_gallery():
+                    print("⚠️  Не удалось вернуться в галерею, пробуем заново...")
                     self.go_to_photo_section()
-                    time.sleep(2)
 
-                # Кликаем по кнопке "Загрузить фото" через JS
+                self._random_delay(2, 4, "переход в галерею")
+
                 upload_btn = self.wait.until(
                     EC.presence_of_element_located(
                         (
@@ -249,16 +477,15 @@ class TaborPhotoUploader:
                 self.driver.execute_script("arguments[0].click();", upload_btn)
                 print("✅ Нажата кнопка 'Загрузить фото'")
 
-                # 🆕 Ждём изменения URL на photo_uploader/new
-                print("⏳ Ожидание открытия загрузчика...")
+                self._wait_for_uploader_script()
+                self._random_delay(1.5, 3, "инициализация загрузчика")
+
                 try:
                     WebDriverWait(self.driver, 10).until(
                         lambda d: "photo_uploader/new" in d.current_url
                     )
                     print(f"✅ URL изменился на загрузчик: {self.driver.current_url}")
                 except TimeoutException:
-                    print("⚠️ URL не изменился, пробуем найти модалку по элементам...")
-                    # Fallback — ждём появления элементов модалки
                     self.wait.until(
                         EC.presence_of_element_located(
                             (
@@ -268,9 +495,6 @@ class TaborPhotoUploader:
                         )
                     )
 
-                time.sleep(2)
-
-                # Ждём появления input для файла
                 self.wait.until(
                     EC.presence_of_element_located(
                         (By.CSS_SELECTOR, "#fileupload_master")
@@ -280,80 +504,55 @@ class TaborPhotoUploader:
                 break
 
             except TimeoutException as e:
-                print(f"⚠️ Модальное окно не появилось (попытка {attempt + 1}/3): {e}")
+                print(f"⚠️  Модальное окно не появилось (попытка {attempt + 1}/3): {e}")
                 if attempt < 2:
-                    print("🔄 Обновляем страницу...")
-                    self.driver.refresh()
-                    time.sleep(3)
+                    # 🆕 Вместо refresh — возвращаемся в галерею по сохранённому URL
+                    if self._gallery_url:
+                        print(f"🔄 Возвращаемся в галерею: {self._gallery_url}")
+                        self.driver.get(self._gallery_url)
+                    else:
+                        self.driver.refresh()
+                    self._random_delay(3, 5, "после обновления")
                     continue
                 else:
                     raise Exception("Не удалось открыть модальное окно после 3 попыток")
 
-        # ================== ШАГ 2: ОТПРАВКА ФАЙЛА ==================
+        # ШАГ 2: ОТПРАВКА ФАЙЛА
         file_input = None
         for attempt in range(3):
             try:
                 file_input = self.driver.execute_script(
                     "return document.querySelector('#fileupload_master');"
                 )
-
                 if not file_input:
                     file_input = self._find_file_input()
-
                 if not file_input:
-                    print(f"⚠️ Инпут не найден, попытка {attempt + 1}/3")
-                    time.sleep(1)
+                    self._random_delay(1, 2, "поиск инпута")
                     continue
 
                 self._make_input_visible(file_input)
                 abs_path = os.path.abspath(photo_path)
+                self._random_delay(0.5, 1.5, "перед отправкой файла")
                 file_input.send_keys(abs_path)
-                print(
-                    f"📤 Файл {os.path.basename(photo_path)} отправлен через send_keys"
-                )
+                print(f"📤 Файл {os.path.basename(photo_path)} отправлен")
                 break
 
             except Exception as e:
-                print(f"⚠️ Ошибка отправки (попытка {attempt + 1}/3): {e}")
-                time.sleep(1)
+                print(f"⚠️  Ошибка отправки (попытка {attempt + 1}/3): {e}")
+                self._random_delay(1, 2, "повтор отправки")
                 continue
-        else:
-            # Fallback — отправка через JS
-            try:
-                file_input = self.driver.execute_script(
-                    "return document.querySelector('#fileupload_master');"
-                )
-                if file_input:
-                    self.driver.execute_script(
-                        """
-                        arguments[0].style.display = 'block';
-                        arguments[0].style.visibility = 'visible';
-                        arguments[0].value = arguments[1];
-                        arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-                        """,
-                        file_input,
-                        os.path.abspath(photo_path).replace("\\", "/"),
-                    )
-                    print("📤 Файл отправлен через JS")
-                else:
-                    raise Exception("Инпут не найден")
-            except Exception as e:
-                raise Exception(f"Не удалось отправить файл: {e}")
 
-        # ================== ШАГ 3: ОЖИДАНИЕ 10 СЕКУНД ПОСЛЕ ЗАГРУЗКИ ==================
-        print("⏳ Ожидание 10 секунд после отправки файла...")
-        time.sleep(10)
+        # ШАГ 3: ОЖИДАНИЕ
+        print("⏳ Ожидание после отправки файла...")
+        self._random_delay(8, 13, "загрузка файла на сервер")
 
-        # ================== ШАГ 4: ПРОВЕРКА URL ==================
+        # ШАГ 4: ПРОВЕРКА URL
         current_url = self.driver.current_url
-        print(f"🔍 Текущий URL после загрузки: {current_url}")
+        print(f"🔍 Текущий URL: {current_url}")
 
-        # Проверяем, изменился ли URL обратно на галерею
         if "photos/list" in current_url or "gallery" in current_url:
             print("✅ URL изменился на галерею - фото загружено успешно!")
-
-            # ================== ШАГ 5: ПОИСК КНОПКИ "СОХРАНИТЬ" (5 секунд) ==================
-            print("⏳ Поиск кнопки 'Сохранить' (5 секунд)...")
+            self._random_delay(2, 4, "поиск кнопки Сохранить")
 
             save_btn = None
             save_selectors = [
@@ -369,48 +568,25 @@ class TaborPhotoUploader:
                         EC.presence_of_element_located((By.CSS_SELECTOR, selector))
                     )
                     if save_btn and save_btn.is_displayed() and save_btn.is_enabled():
-                        print(f"✅ Найдена кнопка 'Сохранить' по селектору: {selector}")
                         break
                 except:
                     continue
-            else:
-                # Fallback — поиск через JS
-                try:
-                    save_btn = self.driver.execute_script(
-                        """
-                        return document.querySelector('#crop_action input.button_green') ||
-                            document.querySelector('input.button_green[name="commit"]') ||
-                            document.querySelector('input[value="Сохранить"]') ||
-                            Array.from(document.querySelectorAll('input')).find(el => el.value === 'Сохранить');
-                        """
-                    )
-                    if save_btn:
-                        print("✅ Найдена кнопка 'Сохранить' через JS")
-                except:
-                    pass
 
             if save_btn:
+                self._random_delay(0.5, 1.5, "перед нажатием Сохранить")
                 self.driver.execute_script("arguments[0].click();", save_btn)
-                print("✅ Кнопка 'Сохранить' нажата через JS")
-                time.sleep(3)
+                print("✅ Кнопка 'Сохранить' нажата")
+                self._random_delay(2, 4, "после сохранения")
 
-            # Закрываем модалку (если ещё открыта)
             self._close_upload_modal()
-
-            # Обновляем страницу
-            print("🔄 Обновляем страницу...")
             self.driver.refresh()
-            time.sleep(3)
+            self._random_delay(2, 4, "после обновления")
 
             return {"success": True, "error": "", "type": "success"}
 
         else:
-            # URL НЕ изменился (остался photo_uploader/new)
-            print("⚠️ URL не изменился - что-то пошло не так!")
-
-            # ================== ШАГ 6: ПРОВЕРКА НА ОШИБКИ ==================
-            print("🔍 Проверка на ошибки загрузки...")
-            time.sleep(2)
+            print("⚠️  URL не изменился - проверка ошибок...")
+            self._random_delay(1.5, 3, "проверка ошибок")
 
             try:
                 error_items = self.driver.find_elements(
@@ -419,448 +595,102 @@ class TaborPhotoUploader:
                 for item in error_items:
                     text = item.text.lower()
                     if "слишком часто" in text or "10 минут" in text:
-                        print(f"❌ Ошибка rate_limit: {item.text}")
                         return {
                             "success": False,
                             "error": item.text,
                             "type": "rate_limit",
                         }
                     if "уже существует" in text or "дубликат" in text:
-                        print(f"❌ Ошибка duplicate: {item.text}")
                         return {
                             "success": False,
                             "error": item.text,
                             "type": "duplicate",
                         }
                     if "качество" in text or "плохо" in text:
-                        print(f"❌ Ошибка quality: {item.text}")
                         return {"success": False, "error": item.text, "type": "quality"}
             except Exception as e:
-                print(f"⚠️ Ошибка при проверке ошибок: {e}")
+                print(f"⚠️  Ошибка при проверке: {e}")
 
-            # ================== ШАГ 7: ПРОВЕРКА КОЛИЧЕСТВА ФОТО В ГАЛЕРЕЕ ==================
-            # Пробуем проверить, добавилось ли фото (хотя URL другой)
-            try:
-                # Переходим временно в галерею для проверки
-                print("🔍 Проверка количества фото в галерее...")
-                gallery_url = current_url.split("photo_uploader")[0] + "photos/list"
-                # Не переходим, просто логируем
-                print(f"⚠️ URL остался: {current_url}")
-            except Exception as e:
-                print(f"⚠️ Не удалось проверить галерею: {e}")
+            self._random_delay(4, 7, "дополнительное ожидание")
 
-            # ================== ШАГ 8: ЖДЁМ ЕЩЁ 5 СЕКУНД ==================
-            print("⏳ Ждём ещё 5 секунд...")
-            time.sleep(5)
-
-            # ================== ШАГ 9: ПОВТОРНАЯ ПРОВЕРКА URL И ОШИБОК ==================
             current_url = self.driver.current_url
-            print(f"🔍 Повторная проверка URL: {current_url}")
-
-            # Проверяем, не изменился ли URL за это время
             if "photos/list" in current_url or "gallery" in current_url:
-                print("✅ URL изменился на галерею с задержкой!")
                 self._close_upload_modal()
                 self.driver.refresh()
-                time.sleep(3)
+                self._random_delay(2, 4, "после обновления")
                 return {"success": True, "error": "", "type": "success"}
 
-            # Повторная проверка ошибок
-            try:
-                error_items = self.driver.find_elements(
-                    By.CSS_SELECTOR, ".upload__item_err"
-                )
-                for item in error_items:
-                    text = item.text.lower()
-                    if "слишком часто" in text or "10 минут" in text:
-                        print(f"❌ Ошибка rate_limit: {item.text}")
-                        return {
-                            "success": False,
-                            "error": item.text,
-                            "type": "rate_limit",
-                        }
-                    if "уже существует" in text or "дубликат" in text:
-                        print(f"❌ Ошибка duplicate: {item.text}")
-                        return {
-                            "success": False,
-                            "error": item.text,
-                            "type": "duplicate",
-                        }
-                    if "качество" in text or "плохо" in text:
-                        print(f"❌ Ошибка quality: {item.text}")
-                        return {"success": False, "error": item.text, "type": "quality"}
-            except Exception as e:
-                print(f"⚠️ Ошибка при повторной проверке: {e}")
-
-            # ================== ШАГ 10: ОБНОВЛЯЕМ СТРАНИЦУ В ЛЮБОМ СЛУЧАЕ ==================
-            print("🔄 Обновляем страницу в любом случае...")
             self.driver.refresh()
-            time.sleep(3)
+            self._random_delay(2, 4, "после обновления")
 
-            # Проверяем результат после обновления
             try:
                 photos = self.driver.find_elements(By.CSS_SELECTOR, "li.gallery__item")
                 if photos:
-                    print(f"✅ После обновления найдено {len(photos)} фото в галерее")
                     return {"success": True, "error": "", "type": "success"}
             except:
                 pass
 
-            return {
-                "success": False,
-                "error": "URL не изменился после загрузки, причина неизвестна",
-                "type": "unknown",
-            }
+            return {"success": False, "error": "URL не изменился", "type": "unknown"}
 
     def _find_file_input(self):
-        """Находит input для загрузки файла"""
-        # Пробуем разные способы
         methods = [
-            # 1. Прямой поиск по ID
             lambda: self.driver.find_element(By.CSS_SELECTOR, "#fileupload_master"),
-            # 2. Через JS
             lambda: self.driver.execute_script(
                 "return document.querySelector('#fileupload_master');"
             ),
-            # 3. По name
             lambda: self.driver.find_element(By.CSS_SELECTOR, "input[name='files[]']"),
-            # 4. По атрибуту self_photo
-            lambda: self.driver.find_element(
-                By.CSS_SELECTOR, "input[type='file'][self_photo='true']"
-            ),
-            # 5. Все file inputs
-            lambda: (
-                self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")[0]
-                if self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-                else None
-            ),
         ]
-
         for method in methods:
             try:
                 element = method()
                 if element:
-                    print("✅ Input найден")
                     self._make_input_visible(element)
                     return element
             except Exception:
                 continue
-
         return None
 
-    # def _click_save_button(self):
-    #     # === Ждём кнопку "Сохранить" и кликаем через JS ===
-    #     try:
-    #         # Используем точный селектор, который вы дали
-    #         save_btn = WebDriverWait(self.driver, 10).until(
-    #             EC.presence_of_element_located(
-    #                 (By.CSS_SELECTOR, "#crop_action > input.button.button_green")
-    #             )
-    #         )
-    #         # Кликаем через JavaScript (гарантированный обход перекрытий)
-    #         self.driver.execute_script("arguments[0].click();", save_btn)
-    #         print("✅ Кнопка 'Сохранить' нажата через JS")
-    #     except TimeoutException:
-    #         # Запасной вариант – по старому селектору
-    #         try:
-    #             save_btn = WebDriverWait(self.driver, 3).until(
-    #                 EC.element_to_be_clickable(
-    #                     (By.CSS_SELECTOR, "input.button_green[name='commit']")
-    #                 )
-    #             )
-    #             self.driver.execute_script("arguments[0].click();", save_btn)
-    #             print("✅ Кнопка 'Сохранить' нажата через JS (запасной селектор)")
-    #         except TimeoutException:
-    #             print("⚠️ Кнопка 'Сохранить' не появилась. Продолжаем без неё.")
-
-    #     return self._wait_for_upload_result(timeout=45)
-
     def _make_input_visible(self, element):
-        """Делает input видимым, убирая все скрывающие стили"""
         self.driver.execute_script(
             """
             arguments[0].style.display = 'block';
             arguments[0].style.visibility = 'visible';
             arguments[0].style.opacity = '1';
             arguments[0].style.position = 'relative';
-            arguments[0].style.height = 'auto';
-            arguments[0].style.width = 'auto';
-            arguments[0].style.zIndex = '99999';
-            arguments[0].style.pointerEvents = 'auto';
-            arguments[0].style.overflow = 'visible';
-            arguments[0].style.clip = 'auto';
-            arguments[0].style.margin = '10px';
-            arguments[0].style.padding = '10px';
-            arguments[0].style.border = '2px solid red';
-            arguments[0].style.background = 'white';
-            arguments[0].removeAttribute('disabled');
-            arguments[0].removeAttribute('hidden');
-            arguments[0].removeAttribute('class');
-            arguments[0].className = '';
-            // Убираем !important через установку атрибута
-            arguments[0].setAttribute('style',
-                'display: block !important; ' +
-                'visibility: visible !important; ' +
-                'opacity: 1 !important; ' +
-                'position: relative !important; ' +
-                'z-index: 99999 !important; ' +
-                'height: auto !important; ' +
-                'width: auto !important; ' +
-                'pointer-events: auto !important; ' +
-                'margin: 10px !important; ' +
-                'padding: 10px !important; ' +
-                'border: 2px solid red !important; ' +
-                'background: white !important;'
-            );
-            // Создаем событие, чтобы браузер понял, что элемент изменился
-            arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-            arguments[0].dispatchEvent(new Event('click', { bubbles: true }));
+            arguments[0].style.zIndex = '9999';
+            arguments[0].setAttribute('style', 'display: block !important; visibility: visible !important; opacity: 1 !important; position: relative !important; z-index: 9999 !important;');
         """,
             element,
         )
-        time.sleep(0.5)  # Даем время на применение стилей
-
-    def _wait_for_upload_result(self, timeout: int = 45) -> dict:
-        """Ожидает завершения загрузки."""
-        start = time.time()
-
-        while time.time() - start < timeout:
-            try:
-                # Проверяем наличие кнопки "Сохранить" - если есть, нажимаем
-                save_btns = self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    "#crop_action > input.button.button_green, input.button_green[name='commit']",
-                )
-
-                for btn in save_btns:
-                    if btn.is_displayed() and btn.is_enabled():
-                        print("✅ Найдена кнопка 'Сохранить', нажимаем...")
-                        self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(2)
-                        return {"success": True, "error": "", "type": "success"}
-            except:
-                pass
-
-            # Проверяем ошибки
-            try:
-                error_items = self.driver.find_elements(
-                    By.CSS_SELECTOR, ".upload__item_err"
-                )
-                for item in error_items:
-                    text = item.text.lower()
-                    if "слишком часто" in text or "10 минут" in text:
-                        return {"success": False, "error": text, "type": "rate_limit"}
-                    if "уже существует" in text or "дубликат" in text:
-                        return {"success": False, "error": text, "type": "duplicate"}
-                    if "качество" in text or "плохо" in text:
-                        return {"success": False, "error": text, "type": "quality"}
-            except:
-                pass
-
-            # Проверяем прогресс
-            try:
-                progress = self.driver.find_element(
-                    By.CSS_SELECTOR, ".progressbar__status"
-                )
-                if "100%" in progress.text:
-                    print("✅ Прогресс 100%")
-                    time.sleep(2)
-                    # Проверяем, появилась ли кнопка завершения
-                    try:
-                        last_step = self.driver.find_element(
-                            By.CSS_SELECTOR, ".photos_last_step_action:not(.hidden)"
-                        )
-                        if last_step.is_displayed():
-                            return {"success": True, "error": "", "type": "success"}
-                    except:
-                        pass
-                    return {"success": True, "error": "", "type": "success"}
-            except:
-                pass
-
-            # Проверяем, закрылось ли модальное окно (успех)
-            try:
-                modal = self.driver.find_element(
-                    By.CSS_SELECTOR, ".arcticmodal-container"
-                )
-                if not modal.is_displayed():
-                    print("✅ Модальное окно закрыто - загрузка завершена")
-                    return {"success": True, "error": "", "type": "success"}
-            except:
-                # Модального окна нет - возможно загрузка завершена
-                pass
-
-            time.sleep(2)
-
-        return {"success": False, "error": "Таймаут", "type": "timeout"}
+        time.sleep(0.5)
 
     def _close_upload_modal(self):
-        """Закрывает модальное окно загрузки."""
-        for selector in [
-            ".modal__close.arcticmodal-close",
-            ".arcticmodal-close",
-        ]:
+        for selector in [".modal__close.arcticmodal-close", ".arcticmodal-close"]:
             try:
                 btn = self.driver.find_element(By.CSS_SELECTOR, selector)
                 if btn.is_displayed():
                     btn.click()
-                    time.sleep(0.5)
+                    self._random_delay(0.5, 1, "закрытие модалки")
                     return
-            except (NoSuchElementException, Exception):
+            except:
                 pass
-        # Fallback: ESC
         try:
             self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-            time.sleep(0.5)
-        except Exception:
-            pass
-
-    def _check_upload_completed(self) -> bool:
-        """Проверяет, завершена ли загрузка."""
-        try:
-            # Проверяем наличие новых фото в галерее
-            photos = self._get_gallery_photos()
-            if photos:
-                # Проверяем статус последнего фото
-                status = self._get_photo_status(photos[-1])
-                if status in [
-                    self.STATUS_MAIN,
-                    self.STATUS_BLOCKED,
-                    self.STATUS_PENDING,
-                ]:
-                    return True
         except:
-            pass
-        return False
-
-    def _make_input_visible(self, element):
-        """Делает input видимым"""
-        self.driver.execute_script(
-            """
-            arguments[0].style.display = 'block';
-            arguments[0].style.visibility = 'visible';
-            arguments[0].style.opacity = '1';
-            arguments[0].style.position = 'relative';
-            arguments[0].style.height = 'auto';
-            arguments[0].style.width = 'auto';
-            arguments[0].style.zIndex = '9999';
-            arguments[0].style.pointerEvents = 'auto';
-            arguments[0].removeAttribute('disabled');
-            arguments[0].removeAttribute('hidden');
-            arguments[0].setAttribute('style', 'display: block !important; visibility: visible !important; opacity: 1 !important; position: relative !important; z-index: 9999 !important;');
-            """,
-            element,
-        )
-
-    # def _wait_for_upload_result(self, timeout: int = 45) -> dict:
-    #     """Ожидает завершения загрузки, отслеживает ошибки."""
-    #     result = {"success": False, "error": "", "type": "unknown"}
-    #     start = time.time()
-
-    #     while time.time() - start < timeout:
-    #         # 1. Проверяем ошибки в списке загрузки
-    #         error_items = self.driver.find_elements(
-    #             By.CSS_SELECTOR, ".upload__item_err"
-    #         )
-    #         for item in error_items:
-    #             text = item.text.lower()
-    #             if "слишком часто" in text or "10 минут" in text:
-    #                 return {"success": False, "error": text, "type": "rate_limit"}
-    #             if "уже существует" in text or "дубликат" in text:
-    #                 return {"success": False, "error": text, "type": "duplicate"}
-    #             if "качество" in text or "плохо" in text:
-    #                 return {"success": False, "error": text, "type": "quality"}
-    #             return {"success": False, "error": text, "type": "unknown"}
-
-    #         # 2. Системные ошибки
-    #         try:
-    #             sys_error = self.driver.find_element(
-    #                 By.CSS_SELECTOR, ".system__msg_err:not(.hidden)"
-    #             )
-    #             if sys_error.is_displayed():
-    #                 return {
-    #                     "success": False,
-    #                     "error": sys_error.text,
-    #                     "type": "system",
-    #                 }
-    #         except NoSuchElementException:
-    #             pass
-
-    #         # 3. Шаг "Завершить" = успех
-    #         try:
-    #             last_step = self.driver.find_element(
-    #                 By.CSS_SELECTOR, ".photos_last_step_action:not(.hidden)"
-    #             )
-    #             if last_step.is_displayed():
-    #                 uploaded = self.driver.find_elements(
-    #                     By.CSS_SELECTOR,
-    #                     ".upload__list .upload__item:not(.upload__item_err)",
-    #                 )
-    #                 if uploaded:
-    #                     return {"success": True, "error": "", "type": "success"}
-    #         except NoSuchElementException:
-    #             pass
-
-    #         # 4. Прогресс-бар 100%
-    #         try:
-    #             progress = self.driver.find_element(
-    #                 By.CSS_SELECTOR, ".photos_second_step_action:not(.hidden)"
-    #             )
-    #             if progress.is_displayed():
-    #                 pbar = self.driver.find_element(
-    #                     By.CSS_SELECTOR, ".progressbar__status"
-    #                 )
-    #                 if "100%" in pbar.text:
-    #                     time.sleep(1)
-    #                     continue
-    #         except NoSuchElementException:
-    #             pass
-
-    #         time.sleep(1)
-
-    #     return {"success": False, "error": "Таймаут", "type": "timeout"}
-
-    def _close_upload_modal(self):
-        """Закрывает модальное окно загрузки."""
-        for selector in [
-            ".modal__close.arcticmodal-close",
-            ".arcticmodal-close",
-        ]:
-            try:
-                btn = self.driver.find_element(By.CSS_SELECTOR, selector)
-                if btn.is_displayed():
-                    btn.click()
-                    time.sleep(0.5)
-                    return
-            except (NoSuchElementException, Exception):
-                pass
-        # Fallback: ESC
-        try:
-            self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-            time.sleep(0.5)
-        except Exception:
             pass
 
     # ================== УДАЛЕНИЕ ФОТО ==================
     def delete_photo(self, photo_element) -> bool:
-        """
-        Удаляет фото, переходя на его страницу.
-        Использует JavaScript-клик для кнопки «Удалить», затем ждёт появления
-        кнопки «Да» и кликает по ней через JS (обход перекрытия).
-        """
         try:
             photo_url = self._get_photo_link(photo_element)
             if not photo_url:
-                print("❌ Не удалось получить ссылку на фото")
                 return False
 
-            print(f"🗑 Открываем страницу фото: {photo_url}")
+            print(f"🗑️  Открываем страницу фото: {photo_url}")
             current_url = self.driver.current_url
             self.driver.get(photo_url)
+            self._random_delay(2, 4, "загрузка страницы фото")
 
-            time.sleep(2)  # ждём загрузки страницы
-
-            # Кнопка "Удалить"
             delete_btn = self.wait.until(
                 EC.presence_of_element_located(
                     (
@@ -869,15 +699,13 @@ class TaborPhotoUploader:
                     )
                 )
             )
+            self._random_delay(0.5, 1.5, "перед нажатием Удалить")
             self.driver.execute_script("arguments[0].click();", delete_btn)
-            print("Нажата кнопка 'Удалить' (через JS)")
+            print("Нажата кнопка 'Удалить'")
 
-            # Даём время на появление модального окна
-            time.sleep(1)
+            self._random_delay(1, 2, "ожидание модалки")
 
-            # Ждём появления кнопки "Да" и кликаем через JS по точному селектору
             try:
-                # Используем точный CSS-селектор, который вы указали
                 confirm_btn = WebDriverWait(self.driver, 5).until(
                     EC.presence_of_element_located(
                         (
@@ -886,11 +714,10 @@ class TaborPhotoUploader:
                         )
                     )
                 )
-                # Кликаем через JavaScript (обход перекрытия)
+                self._random_delay(0.3, 1, "перед подтверждением")
                 self.driver.execute_script("arguments[0].click();", confirm_btn)
-                print("✅ Подтверждение удаления нажато через JS")
+                print("✅ Подтверждение удаления нажато")
             except TimeoutException:
-                # Если точный селектор не сработал, пробуем запасной вариант
                 try:
                     confirm_btn = WebDriverWait(self.driver, 3).until(
                         EC.element_to_be_clickable(
@@ -901,23 +728,16 @@ class TaborPhotoUploader:
                         )
                     )
                     self.driver.execute_script("arguments[0].click();", confirm_btn)
-                    print(
-                        "✅ Подтверждение удаления нажато через JS (запасной селектор)"
-                    )
                 except TimeoutException:
-                    # Если ничего не помогло, пробуем Enter
-                    print("⚠️ Кнопка подтверждения не найдена, пробуем Enter...")
                     self.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ENTER)
-                    time.sleep(1)
 
-            time.sleep(2)  # ждём удаления
+            self._random_delay(2, 4, "ожидание удаления")
 
-            # Возврат в галерею
             self.driver.get(current_url)
             self.wait.until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "ul.gallery"))
             )
-            time.sleep(1)
+            self._random_delay(1, 2, "возврат в галерею")
             return True
 
         except Exception as e:
@@ -932,12 +752,11 @@ class TaborPhotoUploader:
     def monitor_photos(self, photo_paths: List[str]):
         queue = list(photo_paths)
 
-        # 📌 ОЧИСТКА: удаляем из очереди все несуществующие файлы
         initial_count = len(queue)
         queue = [p for p in queue if os.path.isfile(p)]
         removed_count = initial_count - len(queue)
         if removed_count > 0:
-            print(f"⚠️ Удалено из очереди {removed_count} несуществующих файлов")
+            print(f"⚠️  Удалено из очереди {removed_count} несуществующих файлов")
         if not queue:
             if self.id_value:
                 response = (
@@ -949,41 +768,55 @@ class TaborPhotoUploader:
                 )
                 if response in ("да", "yes", "y", "д"):
                     if self._trigger_main_processing():
-                        print("🔄 Запрос успешен и фото добавились.")
+                        print("🔄 Запрос успешен.")
                     else:
-                        print("Не удалось выполнить операцию по добавлению")
                         return
                 else:
-                    print("📋 Запрос отменен пользователем. Завершаем.")
+                    print("📋 Запрос отменен.")
             else:
-                print("📋 Очередь пуста. Завершаем.")
-            return  # 🆕 Прерываем выполнение, чтобы не было ошибки с переменной photos
-            photo_index = 0
-        self.go_to_photo_section()
+                print("📋 Очередь пуста.")
+            return
+
+        photo_index = 0
+        self.go_to_photo_section()  # 🆕 Здесь сохраняется self._gallery_url
         max_iterations = 60
         iteration = 0
 
         while iteration < max_iterations and queue:
             iteration += 1
-            print(f"\n--- Итерация {iteration} ---")
+            print(f"\n{'=' * 50}")
+            print(f"--- Итерация {iteration} ---")
+            print(f"{'=' * 50}")
+
+            if iteration > 1:
+                self._random_delay(5, 15, "между итерациями")
+
+            # 🆕 ПЕРЕД каждой итерацией проверяем, что мы в галерее
+            self._ensure_on_gallery()
+
             self.driver.refresh()
-            time.sleep(2)
+            self._random_delay(2, 4, "после обновления")
 
             photos = self._get_gallery_photos()
 
-            # ===== ШАГ 1: Галерея пуста → загружаем новое фото =====
             if not photos:
                 if queue:
-                    # ... (логика загрузки случайного фото без изменений) ...
                     queue = [p for p in queue if os.path.isfile(p)]
                     if not queue:
-                        print("📋 Все файлы были удалены или не найдены.")
                         break
 
                     photo_path = random.choice(queue)
                     print(
-                        f"\n📸 Галерея пуста. Загружаем случайное фото: {os.path.basename(photo_path)}"
+                        f"\n📸 Галерея пуста. Загружаем: {os.path.basename(photo_path)}"
                     )
+
+                    if photo_index > 0:
+                        self._anti_ban_delay()
+
+                    # 🆕 ПЕРЕД загрузкой — гарантируем, что мы в галерее
+                    self._ensure_on_gallery()
+                    self._random_delay(2, 5, "подготовка перед загрузкой")
+
                     success = self.upload_photo(photo_path)
 
                     if success:
@@ -993,48 +826,41 @@ class TaborPhotoUploader:
                         print(
                             f"✅ Загружено {photo_index} фото. Осталось: {len(queue)}"
                         )
+                        self._random_delay(3, 8, "после загрузки")
                     else:
-                        print("❌ Загрузка не удалась. Пропускаем фото.")
+                        print("❌ Загрузка не удалась.")
                         queue.remove(photo_path)
+                        self._random_delay(2, 5, "после неудачной загрузки")
                     continue
                 else:
-                    # 🆕 Очередь пуста, спрашиваем про пополнение
                     if self.id_value:
                         response = (
                             input(
-                                "📸 Фотографии кончились, отправить запрос на пополнение? (да/нет): "
+                                "📸 Фотографии кончились, отправить запрос? (да/нет): "
                             )
                             .strip()
                             .lower()
                         )
                         if response in ("да", "yes", "y", "д"):
                             self._trigger_main_processing()
-                            print("🔄 Запрос выполнен. Завершаем текущий цикл.")
                             break
-                        else:
-                            print("📋 Запрос отменен пользователем. Завершаем.")
-                            break
-                    else:
-                        print("📋 Очередь пуста, галерея пуста. Завершаем.")
-                        break
+                    break
 
-            # ===== ШАГ 2: Галерея не пуста → проверяем статусы =====
-            # ... (остальной код цикла без изменений) ...
             print(f"📸 Найдено фото: {len(photos)}")
-            time.sleep(1.5)
+            self._random_delay(1, 3, "анализ галереи")
             any_processed = False
 
             for i, photo in enumerate(photos):
-                # ... (логика проверки статусов и удаления) ...
                 try:
                     status = self._get_photo_status(photo)
                 except Exception as e:
-                    print(f"⚠️ Ошибка получения статуса фото {i}: {e}")
+                    print(f"⚠️  Ошибка получения статуса фото {i}: {e}")
                     break
 
                 print(f"Фото {i + 1}: статус '{status}'")
 
                 if status == self.STATUS_MAIN:
+                    self._random_delay(1, 2, "проверка главной")
                     decision = (
                         input("✅ Это правильная главная? (да/нет): ").strip().lower()
                     )
@@ -1042,49 +868,40 @@ class TaborPhotoUploader:
                         print("✅ Главная принята. Завершаем.")
                         return
                     else:
-                        print("🗑️ Удаляем неподходящую главную.")
+                        print("🗑️  Удаляем неподходящую главную.")
+                        self._random_delay(1, 3, "перед удалением")
                         if self.delete_photo(photo):
-                            time.sleep(1.5)
+                            self._random_delay(2, 4, "после удаления")
                             any_processed = True
                         break
+
                 elif status == self.STATUS_BLOCKED:
-                    print("⚠️ Заблокированное фото. Удаляем.")
+                    print("⚠️  Заблокированное фото. Удаляем.")
+                    self._random_delay(1, 3, "перед удалением")
                     if self.delete_photo(photo):
-                        time.sleep(1.5)
+                        self._random_delay(2, 4, "после удаления")
+                        self._clear_upload_state()
                         any_processed = True
                     break
+
                 else:
-                    print("⏳ Фото на модерации, ничего не делаем.")
+                    print("⏳ Фото на модерации.")
 
             if not any_processed:
-                print("⏳ Ничего не сделано, ждём 60 секунд...")
-                time.sleep(60)
+                wait_time = random.uniform(50, 70)
+                print(f"⏳ Ничего не сделано, ждём {wait_time:.0f} секунд...")
+                time.sleep(wait_time)
             else:
                 print("🔄 Были изменения, обновляем страницу...")
-                time.sleep(3)
+                self._random_delay(2, 5, "после изменений")
 
-        # Завершение
         if not queue:
-            # 🆕 Дополнительная проверка на случай, если цикл завершился из-за пустой очереди
-            if self.id_value and not photos:
-                response = (
-                    input(
-                        "📸 Фотографии кончились, отправить запрос на пополнение? (да/нет): "
-                    )
-                    .strip()
-                    .lower()
-                )
-                if response in ("да", "yes", "y", "д"):
-                    self._trigger_main_processing()
-            else:
-                print("📋 Все фото обработаны, главная не выбрана.")
+            print("📋 Все фото обработаны.")
         else:
             print("⏰ Таймаут мониторинга.")
 
 
 # ================== ЗАПУСК ==================
-
-
 def start_connect(LOGIN, PASSWORD, PORT_NUMBER, ID_VALUE=None):
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{PORT_NUMBER}")
@@ -1095,7 +912,7 @@ def start_connect(LOGIN, PASSWORD, PORT_NUMBER, ID_VALUE=None):
 
     try:
         uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=ID_VALUE)
-        input("Подтвердите авторизацию (если нужно) и нажмите Enter...")
+        input("Подтвердите авторизацию и нажмите Enter...")
         time.sleep(2)
         uploader.monitor_photos(PHOTO_PATHS)
     except Exception as e:
@@ -1115,14 +932,7 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--login", default=os.getenv("TABOR_LOGIN"))
     parser.add_argument("--password", default=os.getenv("TABOR_PASSWORD"))
-    args = parser.parse_args()
-    parser.add_argument(
-        "--id",
-        type=str,
-        default=os.getenv("TABOR_ID"),
-        help="ID для папки download/extracted/<id>",
-    )
+    parser.add_argument("--id", type=str, default=os.getenv("TABOR_ID"))
 
     args = parser.parse_args()
-
     start_connect(args.login, args.password, args.port, args.id)
