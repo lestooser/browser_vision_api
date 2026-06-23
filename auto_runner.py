@@ -19,6 +19,7 @@ from typing import Dict, Optional
 BROWSER_VISION_PATH = Path(__file__).parent
 LOG_DIR = BROWSER_VISION_PATH / "logs"
 TEBOR_PROCESSES_FILE = LOG_DIR / "tebor_processes.json"
+ACTIVE_PROFILES_FILE = LOG_DIR / "active_profiles.json"
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -90,7 +91,79 @@ def _unregister_tebor_process(profile_uuid: str):
         _save_tebor_processes(processes)
 
 
+# ================== УПРАВЛЕНИЕ СПИСКОМ АКТИВНЫХ ПРОФИЛЕЙ ==================
+def _load_active_profiles() -> Dict[str, dict]:
+    """Загружает профили, запущенные автоматикой/ботом этого проекта."""
+    if ACTIVE_PROFILES_FILE.exists():
+        try:
+            with open(ACTIVE_PROFILES_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Не удалось загрузить active_profiles.json: {e}")
+    return {}
+
+
+def _save_active_profiles(profiles: Dict[str, dict]) -> None:
+    """Сохраняет карту активных профилей аналогично active_map из main.py."""
+    try:
+        with open(ACTIVE_PROFILES_FILE, "w", encoding="utf-8") as f:
+            json.dump(profiles, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Не удалось сохранить active_profiles.json: {e}")
+
+
+def _register_active_profile(
+    profile_id: str,
+    port: Optional[int],
+    profile_name: str,
+    person_id: Optional[str] = None,
+    tebor_pid: Optional[int] = None,
+) -> None:
+    """Регистрирует запущенный профиль для последующей остановки через бота."""
+    if not profile_id:
+        return
+    active_profiles = _load_active_profiles()
+    current = active_profiles.get(profile_id, {})
+    current.update(
+        {
+            "port": port,
+            "name": profile_name,
+            "person_id": person_id,
+            "tebor_pid": tebor_pid or current.get("tebor_pid"),
+            "started_at": current.get("started_at") or datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+    )
+    active_profiles[profile_id] = current
+    _save_active_profiles(active_profiles)
+
+
+def _unregister_active_profile(profile_id: str) -> None:
+    """Удаляет профиль из persistent active_map."""
+    active_profiles = _load_active_profiles()
+    if profile_id in active_profiles:
+        del active_profiles[profile_id]
+        _save_active_profiles(active_profiles)
+
+
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+
+
+def _get_profile_identifier(profile: dict) -> Optional[str]:
+    """Возвращает идентификатор профиля так же, как пункты меню main.py."""
+    profile_id = profile.get("uuid") or profile.get("profile_id") or profile.get("id")
+    return str(profile_id) if profile_id is not None else None
+
+
+def _get_profile_port(profile: dict) -> Optional[int]:
+    """Достаёт CDP-порт из разных возможных полей ответа API."""
+    port = profile.get("port") or profile.get("debug_port") or profile.get("cdp_port")
+    try:
+        return int(port) if port else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_person_id_from_profile(profile: dict) -> Optional[str]:
     """Извлекает ID человека из имени профиля (формат: {id}-{город})."""
     profile_name = profile.get("profile_name", "")
@@ -214,19 +287,42 @@ def _run_tebor_for_profile(
 # ================== ОСНОВНЫЕ ФУНКЦИИ ==================
 
 
+def _kill_registered_tebor_for_profile(
+    profile_id: str, profile: dict, tebor_processes: Dict[str, dict]
+) -> int:
+    """Закрывает зарегистрированный tebor/консоль для профиля по всем известным ID."""
+    killed = 0
+    ids_to_check = [profile_id, profile.get("uuid"), profile.get("profile_id")]
+    if profile.get("id") is not None:
+        ids_to_check.append(str(profile.get("id")))
+
+    for candidate_id in dict.fromkeys(str(i) for i in ids_to_check if i):
+        tebor_info = tebor_processes.get(candidate_id) or _load_tebor_processes().get(
+            candidate_id
+        )
+        if not tebor_info:
+            continue
+        pid = tebor_info.get("pid")
+        if pid and _is_process_alive(pid):
+            logger.info(f"   🔪 Убиваем процесс tebor (PID {pid}) для {candidate_id}")
+            if _kill_process_tree(pid):
+                killed += 1
+            else:
+                logger.warning(f"   ⚠️ Не удалось убить tebor PID {pid}")
+        _unregister_tebor_process(candidate_id)
+    return killed
+
+
 def launch_all_profiles(
     auto_start_tebor: bool = True,
 ) -> Dict:
     """
     Запускает ВСЕ профили из рабочей группы FOLDER_ID.
-    Работает аналогично запуску нескольких профилей через main.py:
-    - Запуск профилей через API
-    - Ожидание доступности CDP-порта
-    - Запуск tebor.py с автовыбором папки по ID человека
-    - Регистрация PID процессов tebor для последующей остановки
 
-    Returns:
-        dict с результатами
+    Логика повторяет menu_launch_multiple_profiles/launch_selected_profiles,
+    только без ручного выбора: берутся все профили, каждый успешно запущенный
+    профиль записывается в persistent active_map (logs/active_profiles.json),
+    чтобы /stop_all_profile видел именно те профили, которые открыл бот.
     """
     logger.info(f"🚀 Запуск всех профилей (auto_start_tebor={auto_start_tebor})")
 
@@ -235,6 +331,8 @@ def launch_all_profiles(
         "launched": 0,
         "failed": 0,
         "already_running": 0,
+        "tebor_started": 0,
+        "tracked": 0,
         "profiles": [],
     }
 
@@ -250,7 +348,6 @@ def launch_all_profiles(
             result["error"] = "Не удалось подключиться к API"
             return result
 
-        # Получаем все профили
         profiles_data = client.get_profiles(FOLDER_ID)
         if not profiles_data:
             logger.error("❌ Не удалось получить профили")
@@ -258,8 +355,7 @@ def launch_all_profiles(
             return result
 
         profiles = profiles_data.get("items", [])
-        total = profiles_data.get("total", 0)
-
+        total = profiles_data.get("total", len(profiles))
         logger.info(f"📊 Найдено профилей: {total}")
 
         if not profiles:
@@ -267,103 +363,108 @@ def launch_all_profiles(
             result["error"] = "В группе нет профилей"
             return result
 
-        launched_count = 0
-        failed_count = 0
-        already_running = 0
+        tebor_processes = _load_tebor_processes()
+        active_profiles = _load_active_profiles()
 
         for i, profile in enumerate(profiles, 1):
             profile_name = profile.get("profile_name", "N/A")
-            profile_uuid = (
-                profile.get("uuid")
-                or profile.get("profile_id")
-                or str(profile.get("id"))
-            )
+            profile_id = _get_profile_identifier(profile)
             person_id = _extract_person_id_from_profile(profile)
 
-            # Проверяем, не запущен ли уже
-            if profile.get("running"):
-                logger.info(f"[{i}/{len(profiles)}] ⚫ '{profile_name}' уже запущен")
-                already_running += 1
+            if not profile_id:
+                logger.warning(f"[{i}/{len(profiles)}] ⚠️ '{profile_name}' без ID")
+                result["failed"] += 1
                 result["profiles"].append(
-                    {
-                        "name": profile_name,
-                        "uuid": profile_uuid,
-                        "status": "already_running",
-                        "person_id": person_id,
-                    }
+                    {"name": profile_name, "uuid": None, "status": "failed_no_id"}
                 )
                 continue
 
-            # Генерируем порт
-            cdp_port = ProfileCreator.generate_cdp_port()
             logger.info(
-                f"[{i}/{len(profiles)}] 🟢 Запуск '{profile_name}' на порту {cdp_port}"
+                f"[{i}/{len(profiles)}] Обработка '{profile_name}' ({profile_id})"
             )
+            actual_port = _get_profile_port(profile)
+            status = "already_running" if profile.get("running") else "launched"
 
-            # Запускаем профиль
-            start_result = client.start_profile(FOLDER_ID, profile_uuid, port=cdp_port)
-
-            if start_result:
+            if profile.get("running"):
+                result["already_running"] += 1
+                logger.info(f"   ⚫ Уже запущен")
+            else:
+                cdp_port = ProfileCreator.generate_cdp_port()
+                logger.info(f"   🟢 Запуск на порту {cdp_port}")
+                start_result = client.start_profile(
+                    FOLDER_ID, profile_id, port=cdp_port
+                )
+                if not start_result:
+                    logger.error(f"   ❌ Не удалось запустить '{profile_name}'")
+                    result["failed"] += 1
+                    result["profiles"].append(
+                        {
+                            "name": profile_name,
+                            "uuid": profile_id,
+                            "status": "failed",
+                            "person_id": person_id,
+                        }
+                    )
+                    continue
                 actual_port = start_result.get("port") or cdp_port
+                result["launched"] += 1
                 logger.info(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
 
-                # Ждём доступности порта
-                if _wait_for_port(actual_port, timeout=30):
-                    logger.info(f"   ✅ Порт {actual_port} доступен")
-                else:
-                    logger.warning(
-                        f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек"
-                    )
-
-                # Запускаем tebor, если нужно
-                tebor_pid = None
-                if auto_start_tebor:
-                    tebor_pid = _run_tebor_for_profile(
-                        profile_uuid, actual_port, profile_name, person_id
-                    )
-
-                launched_count += 1
-                result["profiles"].append(
-                    {
-                        "name": profile_name,
-                        "uuid": profile_uuid,
-                        "port": actual_port,
-                        "status": "launched",
-                        "tebor_pid": tebor_pid,
-                        "person_id": person_id,
-                    }
-                )
+            if actual_port and _wait_for_port(actual_port, timeout=30):
+                logger.info(f"   ✅ Порт {actual_port} доступен")
+            elif actual_port:
+                logger.warning(f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек")
             else:
-                logger.error(f"   ❌ Не удалось запустить '{profile_name}'")
-                failed_count += 1
-                result["profiles"].append(
-                    {
-                        "name": profile_name,
-                        "uuid": profile_uuid,
-                        "status": "failed",
-                        "person_id": person_id,
-                    }
-                )
+                logger.warning("   ⚠️ API не вернул CDP-порт")
 
-            # Небольшая пауза между запусками
+            tebor_pid = None
+            tebor_info = tebor_processes.get(profile_id) or {}
+            existing_tebor_pid = tebor_info.get("pid") or active_profiles.get(
+                profile_id, {}
+            ).get("tebor_pid")
+            tebor_alive = bool(
+                existing_tebor_pid and _is_process_alive(existing_tebor_pid)
+            )
+
+            if auto_start_tebor and actual_port:
+                if tebor_alive:
+                    tebor_pid = existing_tebor_pid
+                    logger.info(f"   ⚫ tebor уже запущен (PID {tebor_pid})")
+                else:
+                    tebor_pid = _run_tebor_for_profile(
+                        profile_id, actual_port, profile_name, person_id
+                    )
+                    if tebor_pid:
+                        result["tebor_started"] += 1
+            elif auto_start_tebor and not actual_port:
+                logger.warning("   ⚠️ tebor не запущен: неизвестен порт профиля")
+
+            _register_active_profile(
+                profile_id, actual_port, profile_name, person_id, tebor_pid
+            )
+            result["tracked"] += 1
+            result["profiles"].append(
+                {
+                    "name": profile_name,
+                    "uuid": profile_id,
+                    "port": actual_port,
+                    "status": status,
+                    "tebor_pid": tebor_pid,
+                    "person_id": person_id,
+                }
+            )
+
             time.sleep(3)
-
-            # Каждые 5 профилей — делаем паузу подольше, чтобы система "переварила"
             if i % 5 == 0 and i < len(profiles):
                 logger.info(f"   ⏸️ Пауза после {i} профилей (10 сек)...")
                 time.sleep(10)
 
         result["success"] = True
-        result["launched"] = launched_count
-        result["failed"] = failed_count
-        result["already_running"] = already_running
-
         logger.info(
-            f"✅ Итог: запущено {launched_count}, "
-            f"уже работали {already_running}, "
-            f"ошибок {failed_count}"
+            f"✅ Итог: запущено {result['launched']}, уже работали {result['already_running']}, "
+            f"tebor запущено {result['tebor_started']}, отслеживается {result['tracked']}, "
+            f"ошибок {result['failed']}"
         )
-
         return result
 
     except Exception as e:
@@ -374,20 +475,14 @@ def launch_all_profiles(
 
 def stop_all_profiles() -> Dict:
     """
-    Останавливает ВСЕ профили в рабочей группе и закрывает их консоли tebor.
+    Останавливает все профили, которые отслеживает бот, плюс все профили,
+    которые API показывает как running.
 
-    Логика:
-    1. Получает список всех профилей из API
-    2. Для каждого запущенного профиля:
-       a. Останавливает профиль через API (с проверкой и повторами)
-       b. Находит PID процесса tebor (из tebor_processes.json)
-       c. Убивает процесс tebor (вместе с консолью)
-       d. Проверяет, что профиль действительно остановлен
-
-    Returns:
-        dict с результатами
+    Это автоматический аналог menu_stop_multiple: сначала строится active_map
+    из logs/active_profiles.json, затем он дополняется текущими running-профилями
+    из API, после чего каждый профиль останавливается и удаляется из tracking.
     """
-    logger.info("⛔ Остановка всех профилей и их консолей tebor")
+    logger.info("⛔ Остановка всех отслеживаемых/запущенных профилей")
 
     result = {
         "success": False,
@@ -399,8 +494,6 @@ def stop_all_profiles() -> Dict:
     }
 
     try:
-        import requests as req_lib
-
         from api_client import BrowserVisionClient
         from config import FOLDER_ID
 
@@ -418,220 +511,102 @@ def stop_all_profiles() -> Dict:
             return result
 
         profiles = profiles_data.get("items", [])
-        total = profiles_data.get("total", 0)
+        api_profiles_by_id = {
+            _get_profile_identifier(profile): profile
+            for profile in profiles
+            if _get_profile_identifier(profile)
+        }
 
-        logger.info(f"📊 Найдено профилей: {total}")
+        stop_map = _load_active_profiles()
+        for profile_id, profile in api_profiles_by_id.items():
+            if profile.get("running") and profile_id not in stop_map:
+                stop_map[profile_id] = {
+                    "name": profile.get("profile_name", "N/A"),
+                    "port": _get_profile_port(profile),
+                    "person_id": _extract_person_id_from_profile(profile),
+                    "source": "api_running",
+                }
 
-        if not profiles:
-            logger.warning("⚠️ В группе нет профилей")
-            result["error"] = "В группе нет профилей"
+        if not stop_map:
+            logger.info("⚫ Нет отслеживаемых или запущенных профилей")
+            result["success"] = True
             return result
 
-        # Загружаем список процессов tebor
         tebor_processes = _load_tebor_processes()
 
-        stopped_count = 0
-        failed_count = 0
-        skipped_count = 0
-        tebor_killed = 0
-
-        for i, profile in enumerate(profiles, 1):
-            profile_name = profile.get("profile_name", "N/A")
-
-            # 🆕 ВАЖНО: используем 'id' как основной идентификатор
-            profile_uuid = (
-                profile.get("id") or profile.get("uuid") or profile.get("profile_id")
-            )
-
-            if not profile_uuid:
-                logger.warning(
-                    f"[{i}/{len(profiles)}] ⚠️ '{profile_name}' не имеет ID — пропускаем"
-                )
-                skipped_count += 1
-                continue
-
-            is_running = profile.get("running", False)
-
-            # Пропускаем незапущенные
-            if not is_running:
-                logger.info(
-                    f"[{i}/{len(profiles)}] ⚫ '{profile_name}' не запущен — пропускаем"
-                )
-                skipped_count += 1
-                result["profiles"].append(
-                    {
-                        "name": profile_name,
-                        "uuid": profile_uuid,
-                        "status": "skipped",
-                    }
-                )
-                continue
-
+        for i, (profile_id, data) in enumerate(list(stop_map.items()), 1):
+            profile = api_profiles_by_id.get(profile_id, {})
+            profile_name = data.get("name") or profile.get("profile_name", "N/A")
             logger.info(
-                f"[{i}/{len(profiles)}] ⛔ Остановка '{profile_name}' (ID: {profile_uuid})..."
+                f"[{i}/{len(stop_map)}] ⛔ Остановка '{profile_name}' ({profile_id})"
             )
 
-            # 🆕 ШАГ 1: Пытаемся остановить профиль через API с повторами
+            should_stop = bool(profile.get("running", True))
             stop_success = False
-            for attempt in range(3):
+            if should_stop:
                 try:
-                    # Способ 1: через клиент
-                    stop_result = client.stop_profile(FOLDER_ID, profile_uuid)
-
-                    if stop_result is not None:
-                        logger.info(
-                            f"   ✅ Попытка {attempt + 1}: stop_profile вернул результат"
-                        )
-                        stop_success = True
-                        break
-
-                    # Способ 2: прямой HTTP-запрос к API
-                    logger.info(
-                        f"   🔄 Попытка {attempt + 1}: пробуем прямой HTTP-запрос..."
-                    )
-                    from config import LOCAL_URL, TOKEN
-
-                    url = f"{LOCAL_URL}/stop/{FOLDER_ID}/{profile_uuid}"
-                    headers = {"Authorization": f"Bearer {TOKEN}"}
-
-                    response = req_lib.get(url, headers=headers, timeout=10)
-
-                    if response.status_code == 200:
-                        logger.info(
-                            f"   ✅ Прямой запрос успешен (статус {response.status_code})"
-                        )
-                        stop_success = True
-                        break
-                    else:
-                        logger.warning(
-                            f"   ⚠️ Прямой запрос вернул статус {response.status_code}"
-                        )
-
+                    stop_result = client.stop_profile(FOLDER_ID, profile_id)
+                    stop_success = stop_result is not None
                 except Exception as e:
-                    logger.warning(f"   ⚠️ Попытка {attempt + 1} не удалась: {e}")
+                    logger.warning(f"   ⚠️ stop_profile не удался: {e}")
+                    stop_success = False
+            else:
+                logger.info("   ⚫ API считает профиль уже остановленным")
+                result["skipped"] += 1
+                stop_success = True
 
-                if attempt < 2:
-                    time.sleep(1)
-
-            # 🆕 ШАГ 2: Проверяем, что профиль действительно остановлен
             if stop_success:
-                time.sleep(1)  # Даём API время обновить статус
-
-                # Повторно получаем профиль
+                time.sleep(1)
+                check_profile = None
                 try:
-                    check_profile = client.get_profile_by_id(FOLDER_ID, profile_uuid)
-                    if check_profile and not check_profile.get("running"):
-                        logger.info("   ✅ Профиль действительно остановлен")
-                        stopped_count += 1
-                    elif check_profile and check_profile.get("running"):
-                        logger.warning(
-                            "   ⚠️ Профиль всё ещё запущен! Принудительная остановка..."
-                        )
-                        # Принудительная остановка через прямой запрос
-                        try:
-                            from config import LOCAL_URL, TOKEN
-
-                            url = f"{LOCAL_URL}/stop/{FOLDER_ID}/{profile_uuid}"
-                            headers = {"Authorization": f"Bearer {TOKEN}"}
-                            req_lib.get(url, headers=headers, timeout=10)
-                            time.sleep(1)
-
-                            # Ещё раз проверяем
-                            check_profile = client.get_profile_by_id(
-                                FOLDER_ID, profile_uuid
-                            )
-                            if check_profile and not check_profile.get("running"):
-                                logger.info("   ✅ Принудительная остановка успешна")
-                                stopped_count += 1
-                            else:
-                                logger.error("   ❌ Не удалось остановить профиль")
-                                failed_count += 1
-                        except Exception as e:
-                            logger.error(f"   ❌ Ошибка принудительной остановки: {e}")
-                            failed_count += 1
-                    else:
-                        # Не удалось получить профиль, но stop_profile вернул результат
-                        logger.info("   ✅ Предполагаем, что профиль остановлен")
-                        stopped_count += 1
+                    check_profile = client.get_profile_by_id(FOLDER_ID, profile_id)
                 except Exception as e:
                     logger.warning(f"   ⚠️ Не удалось проверить статус: {e}")
-                    stopped_count += (
-                        1  # Считаем остановленным, т.к. stop_profile вернул результат
-                    )
-            else:
-                logger.error("   ❌ Все попытки остановки не удались")
-                failed_count += 1
 
-            # 🆕 ШАГ 3: Убиваем процесс tebor, если он зарегистрирован
-            if profile_uuid in tebor_processes:
-                tebor_info = tebor_processes[profile_uuid]
-                pid = tebor_info.get("pid")
-                if pid and _is_process_alive(pid):
-                    logger.info(f"   🔪 Убиваем процесс tebor (PID {pid})...")
-                    if _kill_process_tree(pid):
-                        logger.info("   ✅ Процесс tebor убит")
-                        tebor_killed += 1
-                    else:
-                        logger.warning("   ⚠️ Не удалось убить процесс tebor")
+                if check_profile and check_profile.get("running"):
+                    logger.warning("   ⚠️ Профиль всё ещё running после stop_profile")
+                    result["failed"] += 1
+                    final_status = "failed"
                 else:
-                    logger.info("   ℹ️ Процесс tebor уже не активен")
+                    if should_stop:
+                        result["stopped"] += 1
+                    final_status = "stopped" if should_stop else "skipped"
+                    _unregister_active_profile(profile_id)
+            else:
+                result["failed"] += 1
+                final_status = "failed"
 
-                # Удаляем из списка
-                _unregister_tebor_process(profile_uuid)
-
-            # Также ищем по UUID из других полей
-            for alt_uuid in [profile.get("uuid"), profile.get("profile_id")]:
-                if (
-                    alt_uuid
-                    and alt_uuid in tebor_processes
-                    and alt_uuid != profile_uuid
-                ):
-                    tebor_info = tebor_processes[alt_uuid]
-                    pid = tebor_info.get("pid")
-                    if pid and _is_process_alive(pid):
-                        logger.info(
-                            f"   🔪 Убиваем процесс tebor (альт. UUID, PID {pid})..."
-                        )
-                        if _kill_process_tree(pid):
-                            tebor_killed += 1
-                    _unregister_tebor_process(alt_uuid)
+            killed = _kill_registered_tebor_for_profile(
+                profile_id, profile, tebor_processes
+            )
+            result["tebor_killed"] += killed
 
             result["profiles"].append(
                 {
                     "name": profile_name,
-                    "uuid": profile_uuid,
-                    "status": "stopped" if stop_success else "failed",
+                    "uuid": profile_id,
+                    "status": final_status,
+                    "tebor_killed": killed,
                 }
             )
-
-            # Небольшая пауза между остановками
             time.sleep(0.5)
 
-        # Дополнительная очистка: убиваем все оставшиеся tebor-процессы
-        remaining = _load_tebor_processes()
-        for uuid, info in remaining.items():
+        # Дополнительная очистка: если остались зарегистрированные tebor-процессы,
+        # они тоже были вызваны ботом/автоматикой и должны закрыться.
+        for uuid, info in list(_load_tebor_processes().items()):
             pid = info.get("pid")
             if pid and _is_process_alive(pid):
-                logger.info(
-                    f"🔪 Дополнительная очистка: убиваем tebor для {uuid} (PID {pid})"
-                )
+                logger.info(f"🔪 Доп. очистка tebor для {uuid} (PID {pid})")
                 if _kill_process_tree(pid):
-                    tebor_killed += 1
-                _unregister_tebor_process(uuid)
+                    result["tebor_killed"] += 1
+            _unregister_tebor_process(uuid)
 
         result["success"] = True
-        result["stopped"] = stopped_count
-        result["failed"] = failed_count
-        result["skipped"] = skipped_count
-        result["tebor_killed"] = tebor_killed
-
         logger.info(
-            f"✅ Итог: остановлено {stopped_count}, "
-            f"консолей tebor закрыто {tebor_killed}, "
-            f"пропущено {skipped_count}, "
-            f"ошибок {failed_count}"
+            f"✅ Итог: остановлено {result['stopped']}, "
+            f"консолей tebor закрыто {result['tebor_killed']}, "
+            f"пропущено {result['skipped']}, ошибок {result['failed']}"
         )
-
         return result
 
     except Exception as e:
@@ -679,9 +654,11 @@ def get_running_profiles() -> Dict:
                     "port": p.get("port") or p.get("debug_port"),
                     "person_id": _extract_person_id_from_profile(p),
                     "tebor_pid": tebor_info.get("pid"),
-                    "tebor_alive": _is_process_alive(tebor_info.get("pid", 0))
-                    if tebor_info.get("pid")
-                    else False,
+                    "tebor_alive": (
+                        _is_process_alive(tebor_info.get("pid", 0))
+                        if tebor_info.get("pid")
+                        else False
+                    ),
                 }
             )
 
@@ -704,8 +681,10 @@ def quick_start_all() -> str:
 
     report = (
         f"✅ Запуск завершён\n\n"
-        f"🟢 Запущено: {result['launched']}\n"
+        f"🟢 Запущено новых: {result['launched']}\n"
         f"⚫ Уже работали: {result['already_running']}\n"
+        f"🚀 tebor запущено: {result.get('tebor_started', 0)}\n"
+        f"📌 Отслеживается профилей: {result.get('tracked', 0)}\n"
         f"❌ Ошибок: {result['failed']}"
     )
     return report
