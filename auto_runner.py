@@ -186,6 +186,109 @@ def _get_photo_folder_by_person_id(person_id: str) -> Optional[str]:
     return None
 
 
+def _extract_created_proxy(result: Optional[Dict]) -> Optional[Dict]:
+    """Достаёт созданный proxy из ответа create_proxy."""
+    if not result:
+        return None
+    data = result.get("data")
+    if isinstance(data, list) and data:
+        return data[0]
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def _profile_has_proxy(update_result: Optional[Dict], proxy_id: str) -> bool:
+    """Проверяет, что PATCH профиля вернул нужный proxy_id."""
+    if not update_result:
+        return False
+    data = update_result.get("data")
+    if not isinstance(data, dict):
+        return False
+    if data.get("proxy_id") == proxy_id:
+        return True
+    proxy = data.get("proxy")
+    return isinstance(proxy, dict) and proxy.get("id") == proxy_id
+
+
+def _attach_next_proxy_to_profile(
+    client, folder_id: str, profile_id: str, profile_name: str
+) -> Optional[str]:
+    """
+    Берёт следующий прокси из config/proxy.txt, создаёт его в Browser Vision и
+    привязывает к профилю через PATCH /folders/{folderId}/profiles/{profileId}.
+    """
+    from config import DEFAULT_PROXY_TYPE
+    from config_sequence import SequentialConfig
+
+    sequence = SequentialConfig()
+    while True:
+        try:
+            proxy = sequence.next_proxy()
+        except ValueError as e:
+            logger.error(f"   ❌ Не удалось получить следующий прокси: {e}")
+            return None
+
+        proxy_payload = proxy.to_api_payload(
+            name=f"Proxy {proxy.display}", proxy_type=DEFAULT_PROXY_TYPE
+        )
+        logger.info(
+            f"   🔌 Пробуем следующий прокси для '{profile_name}': {proxy.auth_display}"
+        )
+
+        proxy_result = client.create_proxy(folder_id, proxy_payload)
+        proxy_data = _extract_created_proxy(proxy_result)
+        if not proxy_data or not proxy_data.get("id"):
+            logger.warning("   ⚠️ Прокси не создался, берём следующий")
+            continue
+
+        proxy_id = proxy_data["id"]
+        update_result = client.update_profile(
+            folder_id, profile_id, {"proxy_id": proxy_id}
+        )
+        if _profile_has_proxy(update_result, proxy_id):
+            logger.info(f"   ✅ Прокси привязан к '{profile_name}': {proxy.display}")
+            return proxy_id
+
+        profile = client.get_profile_by_id(folder_id, profile_id)
+        if profile and profile.get("proxy_id") == proxy_id:
+            logger.info(f"   ✅ Прокси подтверждён у '{profile_name}': {proxy.display}")
+            return proxy_id
+
+        logger.warning("   ⚠️ Прокси не привязался к профилю, берём следующий")
+
+
+def _start_profile_with_proxy_retry(
+    client,
+    folder_id: str,
+    profile_id: str,
+    profile_name: str,
+    cdp_port: int,
+) -> tuple[Optional[Dict], int, Optional[str]]:
+    """
+    Запускает профиль. Если запуск не удался, меняет proxy на следующий и
+    пробует запуск ещё раз.
+
+    Возвращает: (start_result, attempts_count, changed_proxy_id).
+    """
+    start_result = client.start_profile(folder_id, profile_id, port=cdp_port)
+    if start_result:
+        return start_result, 1, None
+
+    logger.warning(
+        f"   ⚠️ Не удалось запустить '{profile_name}'. Меняем proxy и пробуем ещё раз"
+    )
+    proxy_id = _attach_next_proxy_to_profile(
+        client, folder_id, profile_id, profile_name
+    )
+    if not proxy_id:
+        return None, 1, None
+
+    time.sleep(2)
+    retry_result = client.start_profile(folder_id, profile_id, port=cdp_port)
+    return retry_result, 2, proxy_id
+
+
 def _wait_for_port(port: int, timeout: int = 30) -> bool:
     """Ждёт, пока порт станет доступен."""
     start_time = time.time()
@@ -332,6 +435,7 @@ def launch_all_profiles(
         "failed": 0,
         "already_running": 0,
         "tebor_started": 0,
+        "proxy_changed": 0,
         "tracked": 0,
         "profiles": [],
     }
@@ -384,6 +488,7 @@ def launch_all_profiles(
             )
             actual_port = _get_profile_port(profile)
             status = "already_running" if profile.get("running") else "launched"
+            changed_proxy_id = None
 
             if profile.get("running"):
                 result["already_running"] += 1
@@ -391,9 +496,13 @@ def launch_all_profiles(
             else:
                 cdp_port = ProfileCreator.generate_cdp_port()
                 logger.info(f"   🟢 Запуск на порту {cdp_port}")
-                start_result = client.start_profile(
-                    FOLDER_ID, profile_id, port=cdp_port
+                start_result, start_attempts, changed_proxy_id = (
+                    _start_profile_with_proxy_retry(
+                        client, FOLDER_ID, profile_id, profile_name, cdp_port
+                    )
                 )
+                if changed_proxy_id:
+                    result["proxy_changed"] += 1
                 if not start_result:
                     logger.error(f"   ❌ Не удалось запустить '{profile_name}'")
                     result["failed"] += 1
@@ -403,6 +512,8 @@ def launch_all_profiles(
                             "uuid": profile_id,
                             "status": "failed",
                             "person_id": person_id,
+                            "start_attempts": start_attempts,
+                            "changed_proxy_id": changed_proxy_id,
                         }
                     )
                     continue
@@ -451,6 +562,7 @@ def launch_all_profiles(
                     "status": status,
                     "tebor_pid": tebor_pid,
                     "person_id": person_id,
+                    "changed_proxy_id": changed_proxy_id,
                 }
             )
 
@@ -462,8 +574,8 @@ def launch_all_profiles(
         result["success"] = True
         logger.info(
             f"✅ Итог: запущено {result['launched']}, уже работали {result['already_running']}, "
-            f"tebor запущено {result['tebor_started']}, отслеживается {result['tracked']}, "
-            f"ошибок {result['failed']}"
+            f"tebor запущено {result['tebor_started']}, proxy заменено {result['proxy_changed']}, "
+            f"отслеживается {result['tracked']}, ошибок {result['failed']}"
         )
         return result
 
@@ -684,6 +796,7 @@ def quick_start_all() -> str:
         f"🟢 Запущено новых: {result['launched']}\n"
         f"⚫ Уже работали: {result['already_running']}\n"
         f"🚀 tebor запущено: {result.get('tebor_started', 0)}\n"
+        f"🔌 proxy заменено: {result.get('proxy_changed', 0)}\n"
         f"📌 Отслеживается профилей: {result.get('tracked', 0)}\n"
         f"❌ Ошибок: {result['failed']}"
     )
