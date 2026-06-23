@@ -37,6 +37,8 @@ logger.setLevel(logging.DEBUG)
 REPLENISH_FLAG_DIR = os.path.join(LOG_DIR, "replenish_needed")
 os.makedirs(REPLENISH_FLAG_DIR, exist_ok=True)
 
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
+
 TG_EVENT_DIR = os.path.join(LOG_DIR, "tg_events")
 os.makedirs(TG_EVENT_DIR, exist_ok=True)
 
@@ -378,11 +380,13 @@ class TaborPhotoUploader:
     def _wait_for_uploader_script(self):
         """Ждёт, пока скрипт загрузчика photo_uploader полностью загрузится."""
         try:
-            WebDriverWait(self.driver, 10).until(lambda d: d.execute_script("""
+            WebDriverWait(self.driver, 10).until(
+                lambda d: d.execute_script("""
                     return document.querySelector('#fileupload_master') !== null ||
                            document.querySelector('.arcticmodal-container') !== null ||
                            document.querySelector('#crop_action') !== null;
-                """))
+                """)
+            )
             print("✅ Скрипт загрузчика загружен")
         except TimeoutException:
             logger.warning("Скрипт загрузчика не загрузился за 10 сек")
@@ -927,9 +931,7 @@ class TaborPhotoUploader:
                                 pass
                             time.sleep(1)
                         else:
-                            print(
-                                f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек"
-                            )
+                            print(f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек")
                             continue
 
                         # Переподключаем Selenium
