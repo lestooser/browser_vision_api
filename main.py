@@ -214,13 +214,6 @@ def run_tebor_py(
         str(port),
         "--auto",
     ]
-
-    # 🆕 ДОБАВЬТЕ ЭТИ СТРОКИ:
-    if person_id:
-        cmd.extend(["--person-id", person_id])
-
-    if profile_name:
-        cmd.extend(["--profile-name", profile_name])
     if profile_name:
         cmd.extend(["--profile-name", profile_name])
     if photo_folder:

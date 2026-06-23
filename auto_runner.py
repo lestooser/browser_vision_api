@@ -364,10 +364,6 @@ def _run_tebor_for_profile(
         "--auto",
     ]
 
-    # 🆕 ДОБАВЬТЕ ЭТИ СТРОКИ:
-    if person_id:
-        cmd.extend(["--person-id", person_id])
-
     if profile_name:
         cmd.extend(["--profile-name", profile_name])
     if photo_folder:
@@ -496,7 +492,7 @@ def launch_all_profiles(
 
             if profile.get("running"):
                 result["already_running"] += 1
-                logger.info("   ⚫ Уже запущен")
+                logger.info(f"   ⚫ Уже запущен")
             else:
                 cdp_port = ProfileCreator.generate_cdp_port()
                 logger.info(f"   🟢 Запуск на порту {cdp_port}")
