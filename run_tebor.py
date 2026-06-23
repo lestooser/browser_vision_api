@@ -10,6 +10,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 
+from console_monitor import start_monitor
 from profile_script.photo_path import get_photo_path
 from profile_script.tebor import TaborPhotoUploader
 
@@ -77,6 +78,8 @@ if __name__ == "__main__":
 
     title = f"Tebor - {profile_name} ({profile_id[:8]}...)"
     set_console_title(title)
+
+    start_monitor(profile_id, os.getpid(), title)
 
     print(
         f'🚀 Запуск tebor.py: профиль "{profile_name}" (ID: {profile_id}), '
