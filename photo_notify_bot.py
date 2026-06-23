@@ -1,16 +1,16 @@
 """
-Отдельный Telegram-бот для уведомлений о пополнении фото в tebor.
-Работает независимо от easy_tg_bot.py.
+Telegram-бот этого проекта для автономного управления профилями и уведомлений tebor.
 
-Логика:
-1. Каждые 30 сек проверяет папку logs/photo_needed/
-2. Если там есть файлы — отправляет уведомления в Telegram
-3. Принимает команду /photo_resume <id> — удаляет файл-флаг
-4. tebor.py обнаруживает удаление файла и продолжает работу
+Команды:
+- /photo_continue [id] — подтвердить, что фото пополнены
+- /start_all_profile — открыть все профили и запустить tebor
+- /stop_all_profile — закрыть все профили и консоли tebor
 """
 
+import html
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -22,9 +22,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ================== КОНФИГУРАЦИЯ ==================
 TOKEN = os.getenv("TG_BOT_TOKEN")
-CHAT_ID = os.getenv("TG_CHAT_ID")  # ID чата для уведомлений (твой личный)
+CHAT_ID = os.getenv("TG_CHAT_ID")
 
 if not TOKEN or not CHAT_ID:
     raise RuntimeError(
@@ -34,226 +33,255 @@ if not TOKEN or not CHAT_ID:
         "TG_CHAT_ID=твой_chat_id"
     )
 
-# Папка с файлами-флагами
 BASE_DIR = Path(__file__).parent
 PHOTO_NEEDED_DIR = BASE_DIR / "logs" / "photo_needed"
+TG_EVENT_DIR = BASE_DIR / "logs" / "tg_events"
 PHOTO_NEEDED_DIR.mkdir(parents=True, exist_ok=True)
+TG_EVENT_DIR.mkdir(parents=True, exist_ok=True)
+
+CHECK_INTERVAL_SECONDS = 30
+RENOTIFY_INTERVAL_SECONDS = 5 * 60
 
 bot = telebot.TeleBot(TOKEN)
+notified_photo_flags = {}
+processed_events = set()
 
-# Множество уже отправленных уведомлений (чтобы не спамить)
-notified_ids = set()
+
+def _is_allowed(message) -> bool:
+    return str(message.chat.id) == str(CHAT_ID)
 
 
-# ================== ФОНОВАЯ ПРОВЕРКА ФАЙЛОВ ==================
-def check_photo_needed_files():
-    """
-    Проверяет папку logs/photo_needed/ и отправляет уведомления.
-    Запускается в отдельном потоке каждые 30 сек.
-    """
-    import threading
+def _read_photo_folder(flag_file: Path) -> str:
+    try:
+        for line in flag_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("folder="):
+                return line.split("=", 1)[1].strip()
+    except Exception as exc:
+        logger.warning("Не удалось прочитать %s: %s", flag_file, exc)
+    return ""
 
+
+def _count_photos(photo_folder: str) -> int:
+    if not photo_folder or not os.path.isdir(photo_folder):
+        return 0
+    return sum(
+        1
+        for name in os.listdir(photo_folder)
+        if name.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"))
+    )
+
+
+def _send_photo_needed(flag_file: Path, repeated: bool = False) -> None:
+    id_value = flag_file.stem
+    photo_folder = _read_photo_folder(flag_file)
+    title = (
+        "📸 <b>Фотографии всё ещё отсутствуют!</b>"
+        if repeated
+        else "📸 <b>Фотографии закончились!</b>"
+    )
+    message = f"{title}\n\n🆔 ID: <code>{html.escape(id_value)}</code>\n"
+    if photo_folder:
+        message += f"📁 Папка: <code>{html.escape(photo_folder)}</code>\n"
+    message += "\nДобавьте фото и отправьте: <code>/photo_continue {}</code>".format(
+        html.escape(id_value)
+    )
+    bot.send_message(CHAT_ID, message, parse_mode="HTML")
+    notified_photo_flags[id_value] = time.time()
+    logger.info("Уведомление о фото отправлено для ID %s", id_value)
+
+
+def _check_photo_needed_files() -> None:
+    now = time.time()
+    active_ids = set()
+    for flag_file in PHOTO_NEEDED_DIR.glob("*.txt"):
+        id_value = flag_file.stem
+        active_ids.add(id_value)
+        last_sent = notified_photo_flags.get(id_value)
+        if last_sent is None:
+            _send_photo_needed(flag_file)
+            continue
+        if now - last_sent < RENOTIFY_INTERVAL_SECONDS:
+            continue
+        photo_folder = _read_photo_folder(flag_file)
+        if _count_photos(photo_folder) > 0:
+            try:
+                flag_file.unlink()
+                notified_photo_flags.pop(id_value, None)
+                bot.send_message(
+                    CHAT_ID,
+                    f"✅ Фото для ID <code>{html.escape(id_value)}</code> найдены. tebor продолжит работу.",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.error("Не удалось удалить флаг %s: %s", flag_file, exc)
+        else:
+            _send_photo_needed(flag_file, repeated=True)
+
+    for old_id in list(notified_photo_flags):
+        if old_id not in active_ids:
+            notified_photo_flags.pop(old_id, None)
+
+
+def _check_tg_events() -> None:
+    for event_file in sorted(TG_EVENT_DIR.glob("*.txt")):
+        if event_file.name in processed_events:
+            continue
+        try:
+            text = event_file.read_text(encoding="utf-8").strip()
+            if text:
+                bot.send_message(CHAT_ID, text, parse_mode="HTML")
+            processed_events.add(event_file.name)
+            event_file.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.error(
+                "Не удалось обработать Telegram-событие %s: %s", event_file, exc
+            )
+
+
+def start_background_watchers() -> None:
     def loop():
         while True:
             try:
-                for flag_file in PHOTO_NEEDED_DIR.glob("*.txt"):
-                    id_value = flag_file.stem
+                _check_photo_needed_files()
+                _check_tg_events()
+            except Exception as exc:
+                logger.exception("Ошибка фоновой проверки: %s", exc)
+            time.sleep(CHECK_INTERVAL_SECONDS)
 
-                    # Пропускаем, если уже уведомляли
-                    if id_value in notified_ids:
-                        continue
-
-                    # Читаем содержимое файла
-                    try:
-                        with open(flag_file, "r", encoding="utf-8") as f:
-                            content = f.read()
-                    except Exception as e:
-                        logger.warning(f"Не удалось прочитать {flag_file}: {e}")
-                        continue
-
-                    # Извлекаем папку из файла
-                    photo_folder = None
-                    for line in content.splitlines():
-                        if line.startswith("folder="):
-                            photo_folder = line.split("=", 1)[1].strip()
-                            break
-
-                    # Формируем сообщение
-                    message = (
-                        f"📸 <b>Фотографии закончились!</b>\n\n"
-                        f"🆔 ID: <code>{id_value}</code>\n"
-                    )
-                    if photo_folder:
-                        message += f"📁 Папка: <code>{photo_folder}</code>\n"
-                    message += (
-                        f"\n"
-                        f"🔄 Добавьте фото в папку и выполните команду:\n"
-                        f"<code>/photo_resume {id_value}</code>"
-                    )
-
-                    # Отправляем уведомление
-                    try:
-                        bot.send_message(
-                            CHAT_ID,
-                            message,
-                            parse_mode="HTML",
-                        )
-                        notified_ids.add(id_value)
-                        logger.info(f"✅ Уведомление отправлено для ID {id_value}")
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка отправки уведомления: {e}")
-
-            except Exception as e:
-                logger.error(f"Ошибка в check_photo_needed_files: {e}")
-
-            time.sleep(30)  # Проверяем каждые 30 сек
-
-    thread = threading.Thread(target=loop, daemon=True)
-    thread.start()
-    logger.info("🔍 Фоновая проверка файлов запущена (каждые 30 сек)")
+    threading.Thread(target=loop, daemon=True).start()
+    logger.info("Фоновая проверка запущена")
 
 
-# ================== КОМАНДЫ БОТА ==================
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
+    if not _is_allowed(message):
+        return
     bot.reply_to(
         message,
-        "🤖 Бот уведомлений о пополнении фото.\n\n"
-        "Когда в tebor заканчиваются фото, бот отправляет уведомление.\n"
-        "После добавления фото выполните:\n"
-        "<code>/photo_resume &lt;id&gt;</code>\n\n"
-        "Пример: <code>/photo_resume 1348</code>",
+        "🤖 Управление Browser Vision через бота проекта.\n\n"
+        "<code>/photo_continue [id]</code> — фото пополнены\n"
+        "<code>/start_all_profile</code> — открыть все профили\n"
+        "<code>/stop_all_profile</code> — закрыть все профили и консоли\n"
+        "<code>/list_needed</code> — список ожиданий фото",
         parse_mode="HTML",
     )
 
 
-@bot.message_handler(commands=["photo_resume"])
-def cmd_photo_resume(message):
-    """Команда для удаления файла-флага — tebor продолжит работу."""
+@bot.message_handler(commands=["photo_continue"])
+def cmd_photo_continue(message):
+    if not _is_allowed(message):
+        return
     parts = message.text.split()
-    if len(parts) < 2:
+    flags = list(PHOTO_NEEDED_DIR.glob("*.txt"))
+    if len(parts) >= 2:
+        flags = [PHOTO_NEEDED_DIR / f"{parts[1].strip()}.txt"]
+    elif len(flags) != 1:
         bot.reply_to(
             message,
-            "❌ Укажите ID: <code>/photo_resume &lt;id&gt;</code>\n"
-            "Пример: <code>/photo_resume 1348</code>",
+            "❌ Укажите ID: <code>/photo_continue &lt;id&gt;</code>",
             parse_mode="HTML",
         )
         return
 
-    id_value = parts[1].strip()
-    flag_file = PHOTO_NEEDED_DIR / f"{id_value}.txt"
-
+    flag_file = flags[0]
+    id_value = flag_file.stem
     if not flag_file.exists():
         bot.reply_to(
             message,
-            f"ℹ️ Для ID <code>{id_value}</code> нет активного запроса.\n\n"
-            f"Возможно, tebor ещё не закончил фото или уже получил сигнал.",
+            f"ℹ️ Для ID <code>{html.escape(id_value)}</code> нет активного запроса.",
             parse_mode="HTML",
         )
         return
 
-    # Читаем содержимое для отчёта
-    photo_folder = None
-    try:
-        with open(flag_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("folder="):
-                    photo_folder = line.split("=", 1)[1].strip()
-                    break
-    except Exception:
-        pass
-
-    # Проверяем наличие фото в папке
-    if photo_folder and os.path.exists(photo_folder):
-        photos = [
-            f
-            for f in os.listdir(photo_folder)
-            if f.lower().endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp"))
-        ]
-        photos_count = len(photos)
-    else:
-        photos_count = 0
-
-    # Удаляем файл-флаг
+    photo_folder = _read_photo_folder(flag_file)
+    photos_count = _count_photos(photo_folder)
     try:
         flag_file.unlink()
-        logger.info(f"🗑️ Файл-флаг удалён: {flag_file}")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Не удалось удалить флаг: {e}")
+        notified_photo_flags.pop(id_value, None)
+    except Exception as exc:
+        bot.reply_to(
+            message,
+            f"❌ Не удалось удалить флаг: {html.escape(str(exc))}",
+            parse_mode="HTML",
+        )
         return
 
-    # Убираем из списка уведомлённых
-    notified_ids.discard(id_value)
-
-    # Отвечаем пользователю
-    response = f"✅ Сигнал отправлен для ID <code>{id_value}</code>.\n\n"
+    response = f"✅ Команда продолжения отправлена для ID <code>{html.escape(id_value)}</code>.\n"
     if photo_folder:
-        response += f"📁 Папка: <code>{photo_folder}</code>\n"
-        response += f"📸 Фото в папке: {photos_count}\n\n"
+        response += f"📁 Папка: <code>{html.escape(photo_folder)}</code>\n📸 Фото в папке: {photos_count}\n"
     if photos_count == 0:
-        response += "⚠️ Папка пуста! tebor снова запросит пополнение."
+        response += "⚠️ Папка пустая: tebor снова отправит уведомление."
     else:
-        response += f"🔄 tebor продолжит загрузку {photos_count} фото."
-
+        response += "🔄 tebor продолжит работу."
     bot.reply_to(message, response, parse_mode="HTML")
+
+
+@bot.message_handler(commands=["start_all_profile"])
+def cmd_start_all_profile(message):
+    if not _is_allowed(message):
+        return
+    bot.reply_to(message, "🚀 Запускаю все профили...")
+
+    def run():
+        try:
+            from auto_runner import quick_start_all
+
+            bot.send_message(CHAT_ID, quick_start_all())
+        except Exception as exc:
+            logger.exception("Ошибка /start_all_profile: %s", exc)
+            bot.send_message(
+                CHAT_ID,
+                f"❌ Ошибка запуска профилей: <code>{html.escape(str(exc))}</code>",
+                parse_mode="HTML",
+            )
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+@bot.message_handler(commands=["stop_all_profile"])
+def cmd_stop_all_profile(message):
+    if not _is_allowed(message):
+        return
+    bot.reply_to(message, "⛔ Останавливаю все профили и консоли...")
+
+    def run():
+        try:
+            from auto_runner import quick_stop_all
+
+            bot.send_message(CHAT_ID, quick_stop_all())
+        except Exception as exc:
+            logger.exception("Ошибка /stop_all_profile: %s", exc)
+            bot.send_message(
+                CHAT_ID,
+                f"❌ Ошибка остановки профилей: <code>{html.escape(str(exc))}</code>",
+                parse_mode="HTML",
+            )
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 @bot.message_handler(commands=["list_needed"])
 def cmd_list_needed(message):
-    """Показать все ID, для которых ожидается пополнение."""
+    if not _is_allowed(message):
+        return
     flags = list(PHOTO_NEEDED_DIR.glob("*.txt"))
-
     if not flags:
         bot.reply_to(message, "ℹ️ Нет активных запросов на пополнение.")
         return
-
     response = f"📋 Активные запросы ({len(flags)}):\n\n"
     for flag_file in flags:
-        id_value = flag_file.stem
-        response += f"• <code>{id_value}</code>\n"
-
+        response += f"• <code>{html.escape(flag_file.stem)}</code>\n"
     bot.reply_to(message, response, parse_mode="HTML")
 
 
-@bot.message_handler(commands=["clear_all"])
-def cmd_clear_all(message):
-    """Удалить все файлы-флаги (для экстренных случаев)."""
-    flags = list(PHOTO_NEEDED_DIR.glob("*.txt"))
-
-    if not flags:
-        bot.reply_to(message, "ℹ️ Нет активных запросов.")
-        return
-
-    for flag_file in flags:
-        try:
-            flag_file.unlink()
-            notified_ids.discard(flag_file.stem)
-        except Exception as e:
-            logger.warning(f"Не удалось удалить {flag_file}: {e}")
-
-    bot.reply_to(message, f"🗑️ Удалено {len(flags)} файлов-флагов.")
-
-
-# ================== ЗАПУСК ==================
 if __name__ == "__main__":
-    print("🚀 Бот уведомлений о пополнении фото запущен...")
-    print(f"📁 Папка флагов: {PHOTO_NEEDED_DIR}")
-    print(f"📨 Chat ID: {CHAT_ID}")
-    print()
-    print("Команды:")
-    print("  /start — помощь")
-    print("  /photo_resume <id> — сигнал tebor продолжить")
-    print("  /list_needed — список активных запросов")
-    print("  /clear_all — удалить все флаги")
-    print()
-
-    # Запускаем фоновую проверку файлов
-    check_photo_needed_files()
-
-    # Запускаем polling
+    print("🚀 Telegram-бот проекта запущен")
+    print(f"📁 Флаги фото: {PHOTO_NEEDED_DIR}")
+    print(f"📁 События: {TG_EVENT_DIR}")
+    start_background_watchers()
     try:
         bot.infinity_polling(timeout=60, long_polling_timeout=60)
     except KeyboardInterrupt:
         print("\n👋 Бот остановлен")
-    except Exception as e:
-        logger.critical(f"💥 Критическая ошибка: {e}")
+    except Exception as exc:
+        logger.critical("Критическая ошибка бота: %s", exc)

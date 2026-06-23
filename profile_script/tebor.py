@@ -33,37 +33,34 @@ logger.setLevel(logging.DEBUG)
 
 
 # ================== ИНТЕГРАЦИЯ С TELEGRAM БОТОМ ==================
-import requests
-
-# Токен и chat_id для уведомлений (из .env)
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID")
-
 # Папка для флагов запросов пополнения
 REPLENISH_FLAG_DIR = os.path.join(LOG_DIR, "replenish_needed")
 os.makedirs(REPLENISH_FLAG_DIR, exist_ok=True)
 
+TG_EVENT_DIR = os.path.join(LOG_DIR, "tg_events")
+os.makedirs(TG_EVENT_DIR, exist_ok=True)
+
+
+def _write_tg_event(event_type: str, message: str, id_value: str = None) -> bool:
+    """Передаёт уведомление локальному Telegram-боту через файл события."""
+    try:
+        safe_id = id_value or "general"
+        filename = (
+            f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{safe_id}_{event_type}.txt"
+        )
+        event_file = os.path.join(TG_EVENT_DIR, filename)
+        with open(event_file, "w", encoding="utf-8") as f:
+            f.write(message)
+        return True
+    except Exception as e:
+        print(f"⚠️ Не удалось создать Telegram-событие: {e}")
+        logger.error(f"Не удалось создать Telegram-событие: {e}")
+        return False
+
 
 def _send_tg_notification(message: str) -> bool:
-    """Отправляет уведомление в Telegram бот."""
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("⚠️ TG_BOT_TOKEN или TG_CHAT_ID не указаны в .env")
-        logger.warning("TG_BOT_TOKEN или TG_CHAT_ID не указаны в .env")
-        return False
-
-    try:
-        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TG_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML",
-        }
-        response = requests.post(url, json=payload, timeout=5)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"⚠️ Не удалось отправить уведомление в Telegram: {e}")
-        logger.error(f"Не удалось отправить уведомление в Telegram: {e}")
-        return False
+    """Совместимость со старым кодом: уведомления забирает бот этого проекта."""
+    return _write_tg_event("notice", message)
 
 
 log_filename = os.path.join(LOG_DIR, f"tabor_{datetime.now().strftime('%Y%m%d')}.log")
@@ -111,7 +108,7 @@ class TaborPhotoUploader:
         Логика:
         1. Создаёт файл-флаг в logs/replenish_needed/{id_value}.txt
         2. Отправляет уведомление в Telegram
-        3. Ждёт, пока бот не удалит файл-флаг (команда /check_replenish)
+        3. Ждёт, пока бот не удалит файл-флаг (команда /photo_continue)
         4. Перечитывает папку с фото
         5. Возвращает новый список фото
 
@@ -137,13 +134,13 @@ class TaborPhotoUploader:
             f"🆔 ID: <code>{self.id_value}</code>\n"
             f"📁 Папка: <code>{photo_folder}</code>\n\n"
             f"🔄 Добавьте фото и выполните команду:\n"
-            f"<code>/check_replenish {self.id_value}</code>"
+            f"<code>/photo_continue {self.id_value}</code>"
         )
         _send_tg_notification(notification)
 
         print("\n⏳ Ожидание команды перепроверки из Telegram...")
         print(f"   Флаг: {flag_file}")
-        print(f"   Команда в боте: /check_replenish {self.id_value}")
+        print(f"   Команда в боте: /photo_continue {self.id_value}")
         logger.info("Ожидание команды перепроверки из Telegram")
 
         # Ждём, пока флаг не будет удалён (максимум 24 часа)
@@ -174,7 +171,7 @@ class TaborPhotoUploader:
                         # Повторно создаём флаг и уведомляем
                         _send_tg_notification(
                             f"⚠️ Для ID <code>{self.id_value}</code> папка пуста.\n"
-                            f"Добавьте фото и повторите: <code>/check_replenish {self.id_value}</code>"
+                            f"Добавьте фото и повторите: <code>/photo_continue {self.id_value}</code>"
                         )
                         # Повторно создаём флаг
                         try:
@@ -381,13 +378,11 @@ class TaborPhotoUploader:
     def _wait_for_uploader_script(self):
         """Ждёт, пока скрипт загрузчика photo_uploader полностью загрузится."""
         try:
-            WebDriverWait(self.driver, 10).until(
-                lambda d: d.execute_script("""
+            WebDriverWait(self.driver, 10).until(lambda d: d.execute_script("""
                     return document.querySelector('#fileupload_master') !== null ||
                            document.querySelector('.arcticmodal-container') !== null ||
                            document.querySelector('#crop_action') !== null;
-                """)
-            )
+                """))
             print("✅ Скрипт загрузчика загружен")
         except TimeoutException:
             logger.warning("Скрипт загрузчика не загрузился за 10 сек")
@@ -700,81 +695,19 @@ class TaborPhotoUploader:
                     )
 
     def _trigger_main_processing(self):
-        """Вызывает логику из main.py для обработки фотографий."""
-        if not self.id_value:
-            logger.error("Не указан ID для запроса к main.py")
-            print("❌ Ошибка: Не указан ID для запроса к main.py")
-            return False
+        """Автогенерация через внешний проект отключена.
 
-        print(f"\n🔄 Отправка запроса в main для ID: {self.id_value} (итераций: 5)...")
-        logger.info(f"Отправка запроса в main для ID: {self.id_value}")
-
-        try:
-            import os
-            import sys
-
-            # 🆕 Сохраняем текущую рабочую директорию
-            original_cwd = os.getcwd()
-
-            # 🆕 Меняем рабочую директорию на selenium-test
-            selenium_test_path = r"D:\python\selenium-test"
-            if not os.path.exists(selenium_test_path):
-                logger.error(f"Папка не найдена: {selenium_test_path}")
-                print(f"❌ Папка не найдена: {selenium_test_path}")
-                return False
-
-            os.chdir(selenium_test_path)
-            print(f"📁 Рабочая директория: {selenium_test_path}")
-
-            # 🆕 Проверяем наличие исходников
-            source_folder = os.path.join(selenium_test_path, "storeg", self.id_value)
-            if not os.path.exists(source_folder):
-                logger.warning(f"Папка с исходниками не найдена: {source_folder}")
-                print(f"⚠️ Папка с исходниками не найдена: {source_folder}")
-                print("   Создаю пустую папку...")
-                os.makedirs(source_folder, exist_ok=True)
-
-            # 🆕 Определяем папку для результатов
-            result_folder = os.path.join(
-                selenium_test_path, "downloads", "extracted", self.id_value
-            )
-            os.makedirs(result_folder, exist_ok=True)
-            print(f"📁 Папка для результатов: {result_folder}")
-
-            sys.path.insert(0, selenium_test_path)
-            from main import start_uniq
-
-            result = start_uniq(
-                id_path=self.id_value,
-                iter_count=5,
-                progress_callback=lambda i, t: print(
-                    f"📊 Прогресс main: {i}/{t} ({int(i / t * 100)}%)"
-                ),
-                download_dir=result_folder,  # 🆕 Передаём папку для результатов
-            )
-
-            if result is True:
-                print("✅ Запрос к main успешно выполнен.")
-                logger.info("Запрос к main успешно выполнен")
-                return True
-            else:
-                logger.error(f"start_uniq вернул {result}, а не True")
-                print(f"❌ start_uniq вернул {result}, а не True")
-                return False
-
-        except Exception as e:
-            self._log_error(f"Ошибка при выполнении main.py: {e}", exception=e)
-            return False
-        finally:
-            # 🆕 Восстанавливаем рабочую директорию
-            try:
-                if "original_cwd" in locals():
-                    os.chdir(original_cwd)
-                    print(f"📁 Восстановлена рабочая директория: {original_cwd}")
-            except Exception as e:
-                logger.warning(f"Не удалось восстановить рабочую директорию: {e}")
-
-        # ================== 🆕 ОЖИДАНИЕ ПОПОЛНЕНИЯ ФОТО ==================
+        Проект больше не обращается к соседним проектам.
+        Пополнение фото управляется только локальным Telegram-ботом:
+        добавьте файлы в папку и выполните /photo_continue <id>.
+        """
+        message = (
+            f"⚠️ Для ID <code>{self.id_value or 'N/A'}</code> автогенерация фото отключена.\n"
+            "Добавьте фото в папку и выполните <code>/photo_continue</code>."
+        )
+        _write_tg_event("error", message, self.id_value)
+        logger.info("Внешняя обработка отключена")
+        return False
 
     def _get_photo_folder(self) -> str:
         """Возвращает путь к папке с фото для текущего ID."""
@@ -797,7 +730,7 @@ class TaborPhotoUploader:
     def _wait_for_photo_replenish(self, max_wait_hours: int = 24) -> bool:
         """
         Создаёт файл-флаг в logs/photo_needed/<id>.txt и ждёт его удаления
-        из Telegram-бота (команда /photo_resume <id>).
+        из Telegram-бота (команда /photo_continue <id>).
 
         Returns:
             True если сигнал получен, False если таймаут или ошибка
@@ -822,7 +755,7 @@ class TaborPhotoUploader:
             print("\n📸 Фотографии кончились!")
             print(f"🆔 ID: {self.id_value}")
             print(f"📁 Папка: {photo_folder}")
-            print(f"⏳ Ожидаю команды /photo_resume {self.id_value} из Telegram...")
+            print(f"⏳ Ожидаю команды /photo_continue {self.id_value} из Telegram...")
         except Exception as e:
             logger.error(f"Не удалось создать файл-флаг: {e}")
             print(f"❌ Не удалось создать файл-флаг: {e}")
@@ -994,7 +927,9 @@ class TaborPhotoUploader:
                                 pass
                             time.sleep(1)
                         else:
-                            print(f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек")
+                            print(
+                                f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек"
+                            )
                             continue
 
                         # Переподключаем Selenium
@@ -1601,6 +1536,11 @@ class TaborPhotoUploader:
                         if decision in ("да", "yes", "y"):
                             print("✅ Главная принята. Завершаем.")
                             logger.info("Главная принята. Завершаем работу.")
+                            _write_tg_event(
+                                "main_photo",
+                                f"✅ На фото появился статус <b>Главная</b> для ID <code>{self.id_value or 'N/A'}</code>.",
+                                self.id_value,
+                            )
                             return
                         else:
                             print("🗑️  Удаляем неподходящую главную.")
@@ -1644,6 +1584,11 @@ class TaborPhotoUploader:
 
         except Exception as e:
             self._log_error(f"Критическая ошибка в monitor_photos: {e}", exception=e)
+            _write_tg_event(
+                "error",
+                f"❌ Ошибка tebor для ID <code>{self.id_value or 'N/A'}</code>: <code>{str(e)}</code>",
+                self.id_value,
+            )
             raise
 
 
