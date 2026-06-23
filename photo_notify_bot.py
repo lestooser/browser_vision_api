@@ -78,20 +78,25 @@ def _count_photos(photo_folder: str) -> int:
 
 
 def _send_photo_needed(flag_file: Path, repeated: bool = False) -> None:
-    id_value = flag_file.stem
+    id_value = flag_file.stem  # 🆕 Теперь здесь будет "1212-Новгород"
     photo_folder = _read_photo_folder(flag_file)
-    title = (
-        "📸 <b>Фотографии всё ещё отсутствуют!</b>"
-        if repeated
-        else "📸 <b>Фотографии закончились!</b>"
-    )
-    message = f"{title}\n\n🆔 ID: <code>{html.escape(id_value)}</code>\n"
+
+    # 🆕 Формируем сообщение в запрошенном вами формате
+    if repeated:
+        message = (
+            f"📸 <b>{html.escape(id_value)}</b> — фотографии всё ещё отсутствуют!\n\n"
+        )
+    else:
+        message = f"📸 <b>{html.escape(id_value)}</b> — фотографии закончились!\n\n"
+
     if photo_folder:
-        message += f"📁 Папка: <code>{html.escape(photo_folder)}</code>\n"
-    message += f"\nДобавьте фото и отправьте: <code>/photo_continue {html.escape(id_value)}</code>"
+        message += f"📁 Папка: <code>{html.escape(photo_folder)}</code>\n\n"
+
+    message += f"🔄 Добавьте фото и отправьте:\n<code>/photo_continue {html.escape(id_value)}</code>"
 
     bot.send_message(CHAT_ID, message, parse_mode="HTML")
     notified_photo_flags[id_value] = time.time()
+    logger.info("Уведомление о фото отправлено для %s", id_value)
 
 
 def _check_photo_needed_files() -> None:
@@ -114,7 +119,7 @@ def _check_photo_needed_files() -> None:
                 notified_photo_flags.pop(id_value, None)
                 bot.send_message(
                     CHAT_ID,
-                    f"✅ Фото для ID <code>{html.escape(id_value)}</code> найдены.",
+                    f"✅ <b>{html.escape(id_value)}</b> — фото найдены. tebor продолжит работу.",
                     parse_mode="HTML",
                 )
             except Exception:

@@ -117,7 +117,12 @@ if __name__ == "__main__":
             f"на порту {args.port}"
         )
 
-        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=profile_id)
+        display_id = (
+            profile_name if profile_name and profile_name != "без имени" else profile_id
+        )
+        safe_id = "".join(c for c in display_id if c not in r'<>:"/\|?*').strip()
+
+        uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=safe_id)
 
         if args.auto:
             # 🆕 ВСЕГДА сначала проверяем авторизацию, даже без логина/пароля
