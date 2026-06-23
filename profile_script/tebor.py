@@ -23,6 +23,7 @@ from profile_script.photo_path import get_photo_path
 
 load_dotenv()
 PHOTO_PATHS = get_photo_path(os.getenv("FOLDER_PHOTO_PATH"))
+TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
 # ================== НАСТРОЙКА ЛОГГИРОВАНИЯ ==================
 LOG_DIR = "logs"
@@ -378,11 +379,13 @@ class TaborPhotoUploader:
     def _wait_for_uploader_script(self):
         """Ждёт, пока скрипт загрузчика photo_uploader полностью загрузится."""
         try:
-            WebDriverWait(self.driver, 10).until(lambda d: d.execute_script("""
+            WebDriverWait(self.driver, 10).until(
+                lambda d: d.execute_script("""
                     return document.querySelector('#fileupload_master') !== null ||
                            document.querySelector('.arcticmodal-container') !== null ||
                            document.querySelector('#crop_action') !== null;
-                """))
+                """)
+            )
             print("✅ Скрипт загрузчика загружен")
         except TimeoutException:
             logger.warning("Скрипт загрузчика не загрузился за 10 сек")
@@ -927,9 +930,7 @@ class TaborPhotoUploader:
                                 pass
                             time.sleep(1)
                         else:
-                            print(
-                                f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек"
-                            )
+                            print(f"   ⚠️ Порт {actual_port} не стал доступен за 30 сек")
                             continue
 
                         # Переподключаем Selenium
