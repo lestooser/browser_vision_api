@@ -374,14 +374,16 @@ def launch_selected_profiles(
         return False
     profiles = profiles_data.get("items", [])
     if not profiles:
-        print("⚠️  В группе нет профилей")
+        print("⚠️ В группе нет профилей")
         return False
-
     indices = parse_selection(selection_text, len(profiles))
     if indices is None:
         return False
 
-    use_individual_folders = common_photo_folder is None
+    # 🆕 Определяем режим работы с папками
+    use_auto_folders = common_photo_folder == "auto"
+    use_individual_folders = common_photo_folder is None and not use_auto_folders
+    # use_auto_folders = common_photo_folder == "auto"
 
     launched_any = False
     for idx in indices:
@@ -400,7 +402,7 @@ def launch_selected_profiles(
 
         if profile_uuid in active_map:
             print(
-                f"\n⚠️  Профиль {idx + 1}. {name} ({profile_uuid}) уже запущен на порту {active_map[profile_uuid]['port']}"
+                f"\n⚠️ Профиль {idx + 1}. {name} ({profile_uuid}) уже запущен на порту {active_map[profile_uuid]['port']}"
             )
             continue
 
@@ -421,13 +423,20 @@ def launch_selected_profiles(
             }
             print(f"   ✅ Запущен | CDP: http://127.0.0.1:{actual_port}")
 
-            # Папка для этого профиля по ID человека
-            if use_individual_folders:
+            # 🆕 Определяем папку в зависимости от режима
+            if use_auto_folders:
+                # Автоматический путь по ID человека
+                photo_folder = get_photo_folder_by_person_id(person_id)
+                if photo_folder:
+                    print(f"   📁 Авто-папка: {photo_folder}")
+                else:
+                    print(f"   ⚠️ Авто-папка не найдена для ID {person_id}")
+            elif use_individual_folders:
+                # Запрашиваем у пользователя
                 photo_folder = ask_photo_folder(person_id, name)
             else:
+                # Используем общую папку
                 photo_folder = common_photo_folder
-                if not photo_folder and person_id:
-                    photo_folder = get_photo_folder_by_person_id(person_id)
 
             # В tebor передаём UUID профиля, а person_id для папки
             run_tebor_py(profile_uuid, actual_port, name, photo_folder, person_id)
@@ -641,7 +650,6 @@ def menu_launch_multiple_profiles(client, active_map: Dict[str, dict]):
         print_separator()
         print("📂 Профили в рабочей группе")
         print("-" * 60)
-
         profiles_data = api_retry(client.get_profiles, FOLDER_ID)
         if not profiles_data:
             print("❌ Не удалось получить профили")
@@ -672,18 +680,18 @@ def menu_launch_multiple_profiles(client, active_map: Dict[str, dict]):
         if folder_choice == "1":
             common_photo_folder = ask_photo_folder()
         elif folder_choice == "3":
-            # Используем автоматические пути для каждого профиля
+            # 🆕 Передаём "auto" вместо None
             common_photo_folder = "auto"
             print("   📁 Будет использован автоматический путь для каждого профиля")
         elif folder_choice != "2":
-            print("⚠️  Неверный выбор, будет запрошено для каждого профиля отдельно")
+            print("⚠️ Неверный выбор, будет запрошено для каждого профиля отдельно")
 
-        # Если common_photo_folder == "auto" - в launch_selected_profiles будет вызываться get_photo_folder для каждого
+        # 🆕 Передаём common_photo_folder как есть (включая "auto")
         if launch_selected_profiles(
             client,
             sel,
             active_map,
-            common_photo_folder if common_photo_folder != "auto" else None,
+            common_photo_folder,  # ✅ Передаём как есть (None / "auto" / путь)
         ):
             print("✅ Команда запуска выполнена")
 
@@ -856,6 +864,12 @@ def main():
         print("    12. Запустить несколько профилей")
         print("    13. Запустить tebor для нескольких профилей")
         print("    14. Остановить несколько профилей")
+        # В блоке меню (после пункта 14) добавь:
+        print("  🚀 АВТОЗАПУСК: ")
+        print("    15. 🟢 Запустить ВСЕ профили (с tebor)")
+        print("    16. ⛔ Остановить ВСЕ профили")
+        print("    17. 📊 Статус запущенных профилей")
+        print()
         print()
         print("  ⚙️  ДРУГОЕ:")
         print("    8. Проверить соединение")
@@ -922,6 +936,24 @@ def main():
 
             elif choice == "14":
                 menu_stop_multiple(client, active_profiles)
+
+            elif choice == "15":
+                from auto_runner import quick_start_all
+
+                print("\n🚀 Запуск всех профилей...")
+                print(quick_start_all())
+
+            elif choice == "16":
+                from auto_runner import quick_stop_all
+
+                print("\n⛔ Остановка всех профилей...")
+                print(quick_stop_all())
+
+            elif choice == "17":
+                from auto_runner import quick_status
+
+                print("\n📊 Статус:")
+                print(quick_status())
 
             elif choice == "0":
                 print("\n👋 До свидания!")

@@ -1,16 +1,11 @@
+import ctypes
 import os
 import sys
 import time
+import traceback
 from pathlib import Path
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
-sys.path.insert(0, str(Path(__file__).parent))
-
-import ctypes
-
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -18,29 +13,30 @@ from selenium.webdriver.chrome.service import Service
 from profile_script.photo_path import get_photo_path
 from profile_script.tebor import TaborPhotoUploader
 
+load_dotenv()
+sys.path.insert(0, str(Path(__file__).parent))
+
 
 def set_console_title(title: str):
     """Устанавливает заголовок окна консоли."""
     try:
         ctypes.windll.kernel32.SetConsoleTitleW(title)
-    except:
+    except Exception:
         pass
 
 
 def get_photo_folder(profile_id: str, custom_folder: str = None) -> str:
     r"""
     Определяет папку с фотографиями для профиля.
-
     Приоритет:
     1. custom_folder (если передан через --photo-folder)
-    2. Автоматический путь: D:\\python\\selenium-test\\downloads\\extracted\\<profile_id>
+    2. Автоматический путь: D:\python\selenium-test\downloads\extracted\<profile_id>
     3. Переменная окружения FOLDER_PHOTO_PATH (если задана)
     """
     if custom_folder:
         return custom_folder
 
     if profile_id and profile_id != "unknown":
-        # Формируем путь на основе ID профиля
         auto_folder = f"D:\\python\\selenium-test\\downloads\\extracted\\{profile_id}"
         if os.path.exists(auto_folder):
             print(f"📁 Найдена папка профиля: {auto_folder}")
@@ -48,7 +44,6 @@ def get_photo_folder(profile_id: str, custom_folder: str = None) -> str:
         else:
             print(f"⚠️ Папка профиля не найдена: {auto_folder}")
 
-    # Fallback на переменную окружения
     env_folder = os.getenv("FOLDER_PHOTO_PATH")
     if env_folder:
         print(f"⚠️ Используем папку из .env: {env_folder}")
@@ -59,7 +54,6 @@ def get_photo_folder(profile_id: str, custom_folder: str = None) -> str:
 
 if __name__ == "__main__":
     import argparse
-    import traceback
 
     parser = argparse.ArgumentParser(description="Tabor photo uploader")
     parser.add_argument("--profile-id", help="ID профиля")
@@ -85,7 +79,8 @@ if __name__ == "__main__":
     set_console_title(title)
 
     print(
-        f'🚀 Запуск tebor.py: профиль "{profile_name}" (ID: {profile_id}), порт: {args.port}, auto={args.auto}'
+        f'🚀 Запуск tebor.py: профиль "{profile_name}" (ID: {profile_id}), '
+        f"порт: {args.port}, auto={args.auto}"
     )
 
     LOGIN = args.login or os.getenv("TABOR_LOGIN")
@@ -99,7 +94,6 @@ if __name__ == "__main__":
         print(f"📁 Папка с фото: {photo_folder}")
         print(f"🖼️  Найдено фото: {len(PHOTO_PATHS)}")
         if PHOTO_PATHS:
-            # Показываем первые 3 файла для примера
             for i, path in enumerate(PHOTO_PATHS[:3], 1):
                 print(f"   {i}. {os.path.basename(path)}")
             if len(PHOTO_PATHS) > 3:
@@ -108,32 +102,40 @@ if __name__ == "__main__":
         PHOTO_PATHS = []
         print("⚠️  Папка с фото не найдена. Будет предложено пополнение.")
 
-    # ❌ УДАЛЕНО: if not PHOTO_PATHS: print("❌ Нет фотографий...")
-
     options = Options()
     options.add_experimental_option("debuggerAddress", f"127.0.0.1:{args.port}")
     service = Service(r"C:\chromedriver_148\chromedriver-win64\chromedriver.exe")
 
+    driver = None
     try:
         driver = webdriver.Chrome(service=service, options=options)
         print(
-            f"✅ Selenium подключился к профилю {args.profile_id or 'unknown'} на порту {args.port}"
+            f"✅ Selenium подключился к профилю {args.profile_id or 'unknown'} "
+            f"на порту {args.port}"
         )
 
         uploader = TaborPhotoUploader(driver, LOGIN, PASSWORD, id_value=profile_id)
 
         if args.auto:
-            if LOGIN and PASSWORD:
-                uploader.login(LOGIN, PASSWORD)
-                # ✅ ВСЕГДА вызываем monitor_photos, даже если PHOTO_PATHS пуст
-                uploader.monitor_photos(PHOTO_PATHS)
+            # 🆕 ВСЕГДА сначала проверяем авторизацию, даже без логина/пароля
+            driver.get("https://tabor.ru")
+            if uploader.is_already_logged_in(timeout=10):
+                print("🔑 Профиль уже авторизован")
+                # go_to_photo_section() сам кликнет по элементу профиля
+            elif LOGIN and PASSWORD:
+                print("🔐 Требуется авторизация...")
+                uploader.login()  # ← БЕЗ аргументов! Они уже в __init__
+                time.sleep(2)
             else:
-                print("\n🔐 Отсутствуют логин/пароль. Перехожу в ручной режим.")
-                driver.get("https://tabor.ru")
-                print("👆 Авторизуйтесь вручную, затем нажмите Enter.")
-                input("⏎ Нажмите Enter после успешного входа...")
-                # ✅ ВСЕГДА вызываем monitor_photos
-                uploader.monitor_photos(PHOTO_PATHS)
+                print("❌ Профиль не авторизован и нет логина/пароля.")
+                print("   Укажите логин/пароль через --login/--password или в .env")
+                sys.exit(1)
+
+            # Переходим в галерею
+            uploader.go_to_photo_section()
+
+            # Запускаем мониторинг
+            uploader.monitor_photos(PHOTO_PATHS)
         else:
             driver.get("https://tabor.ru")
             print("✅ Браузер открыт на tabor.ru")
@@ -150,6 +152,7 @@ if __name__ == "__main__":
         input("Enter для выхода...")
     finally:
         try:
-            driver.quit()
-        except:
+            if driver:
+                driver.quit()
+        except Exception:
             pass
