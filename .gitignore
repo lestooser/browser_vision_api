@@ -1,0 +1,34 @@
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+/config/*.txt
+!/config/*.example.txt
+/config/_state.json
+
+# Runtime state and output
+/active_profiles.json
+/profile_queue.json
+/logs/
+/downloads/
+*.log
+
+# Local browser driver (download separately)
+/chromedriver-win64/chromedriver.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+venv/
+.venv/
+
+# IDE and operating system
+.vscode/settings.json
+.idea/
+Thumbs.db
+.DS_Store
+
+# Local agent settings
+.kilo/
+.claude/settings.local.json

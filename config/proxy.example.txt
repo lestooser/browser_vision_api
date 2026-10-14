@@ -1,0 +1,3 @@
+# Replace with your own proxy entries if proxy rotation is needed.
+# Supported formats: host:port or host:port:username:password
+proxy.example.invalid:8080
